@@ -324,7 +324,12 @@
     .ledger-row .vf { color: var(--text-3); }
     .ledger-row .vf .bad { color: var(--err); }
     .ledger-row .vf .ok { color: var(--ok); }
-    #repair-box { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+    details.more { margin-top: 8px; font-size: 12px; color: var(--text-3); }
+    details.more summary { cursor: pointer; list-style: none; }
+    details.more summary::-webkit-details-marker { display: none; }
+    details.more summary::before { content: "▸ "; }
+    details.more[open] summary::before { content: "▾ "; }
+    #repair-box { margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--border); }
     #repair-actions { display: none; }
     #repair-info { font-size: 12px; color: var(--text-2); line-height: 1.7; word-break: break-word; }
     #repair-info .cur { color: var(--text); }
@@ -534,38 +539,32 @@
       <button id="clear-sync-btn" data-i18n="clear_sync">清除同步记录（下次从头同步）</button>
     </div>
 
-    <!-- 下载记录：按类别列出处理过的日期段，导出给实时GTO分析模块核对完整性 -->
+    <!-- 下载核对：只放要紧的——实时GTO 连没连上、最近一次核对结果、还缺哪些日期。
+         导出 / 清空 / 导入核对结果这些不常用的操作收进"更多操作"。 -->
     <div id="ledger-card" class="card">
       <div class="ledger-head">
-        <span data-i18n="ledger_title">下载记录</span>
-        <span id="ledger-count"></span>
-      </div>
-      <div id="ledger-list"></div>
-      <div class="ledger-tip" data-i18n="ledger_verify_tip">扩展只能确认你点了下载，无法确认文件是否真正下载成功（网络中断时会静默失败）。打开实时GTO的「GG数据导入」页，扩展会自动把下载交给它逐个核对；也可以导出记录，用实时GTO分析模块核实。</div>
-      <!-- 实时GTO：同一台机器上打开「GG数据导入」页后自动连上，由它逐个文件核对 -->
-      <div class="rtgto-row">
+        <span data-i18n="rtgto_card_title">下载核对</span>
         <span id="rtgto-status" class="rtgto-status off"></span>
-        <button id="rtgto-verify" class="mini" data-i18n="rtgto_verify">发送到实时GTO核对</button>
       </div>
       <div id="rtgto-result"></div>
-      <div class="ledger-actions">
-        <button id="ledger-export-json" data-i18n="ledger_export_json">导出 JSON</button>
-        <button id="ledger-export-csv" data-i18n="ledger_export_csv">导出 CSV</button>
-        <button id="ledger-clear" class="danger" data-i18n="ledger_clear">清空记录</button>
-      </div>
-
-      <!-- 补下载：导入实时GTO的核对结果，只下漏掉的区间 -->
       <div id="repair-box">
-        <div class="ledger-head">
-          <span data-i18n="repair_title">补下载漏下的区间</span>
-          <button id="repair-import" class="mini" data-i18n="repair_import">导入核对结果</button>
+        <div id="repair-info"></div>
+      </div>
+      <!-- 分类明细不再显示，渲染仍在（补下载清单要用），只是隐藏 -->
+      <div id="ledger-list" hidden></div>
+      <details class="more">
+        <summary><span data-i18n="more_actions">更多操作</span> <span id="ledger-count"></span></summary>
+        <div class="ledger-actions">
+          <button id="ledger-export-json" data-i18n="ledger_export_json">导出 JSON</button>
+          <button id="ledger-export-csv" data-i18n="ledger_export_csv">导出 CSV</button>
+          <button id="ledger-clear" class="danger" data-i18n="ledger_clear">清空记录</button>
+        </div>
+        <div class="ledger-actions">
+          <button id="repair-import" data-i18n="repair_import">导入核对结果</button>
+          <span id="repair-actions"><button id="repair-clear" class="danger" data-i18n="repair_clear">清除</button></span>
         </div>
         <input type="file" id="repair-file" accept=".json,application/json" style="display:none">
-        <div id="repair-info"></div>
-        <div class="ledger-actions" id="repair-actions">
-          <button id="repair-clear" class="danger" data-i18n="repair_clear">清除</button>
-        </div>
-      </div>
+      </details>
     </div>
 
     <!-- 运行日志 -->

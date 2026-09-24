@@ -59,7 +59,7 @@ function updateUI(status) {
   pauseResumeBtn.disabled = !isRunning;
   // 同步/补下载共用一个运行状态：跑着的时候不能再开补下载
   if (typeof rtgtoVerifyBtn !== 'undefined' && rtgtoVerifyBtn) {
-    rtgtoVerifyBtn.disabled = !rtgto.ok || rtgtoVerifying || isRunning;
+    if (rtgtoVerifyBtn) rtgtoVerifyBtn.disabled = !rtgto.ok || rtgtoVerifying || isRunning;
   }
   
   // 更新状态显示
@@ -711,23 +711,18 @@ function renderRepair() {
   if (!repairInfo || !Ledger) return;
   repairSegments = [];
   if (!repairImport || !repairImport.items || !repairImport.items.length) {
-    repairInfo.innerHTML = `<span class="muted">${escapeHtml(t('repair_hint'))}</span>`;
+    repairInfo.innerHTML = '';
     repairActions.style.display = 'none';
+    syncStartWithRepair();
     return;
   }
 
-  const lines = [
-    `<span class="muted">${escapeHtml(t('repair_source', {
-      source: repairImport.source === 'rtgto' ? t('repair_source_rtgto') : (repairImport.source || '-'),
-      at: repairImport.importedAt.slice(0, 16).replace('T', ' '),
-    }))}</span>`,
-  ];
+  const lines = [];
   const left = Ledger.outstanding(repairImport.items, lastLedger, repairImport.importedAt);
-  repairActions.style.display = 'flex';
+  repairActions.style.display = '';
 
   if (!left.length) {
-    lines.push(`<span class="ok">✓ ${escapeHtml(t('repair_all_done'))}</span>`);
-    repairInfo.innerHTML = lines.join('<br>');
+    repairInfo.innerHTML = '';
     syncStartWithRepair();
     return;
   }
@@ -866,11 +861,11 @@ function renderRtgto() {
     : rtgto.ok
       ? t('rtgto_connected', { v: (rtgto.info && rtgto.info.appVersion) || '' })
       : t('rtgto_not_connected');
-  rtgtoVerifyBtn.disabled = !rtgto.ok || rtgtoVerifying || isRunning;
+  if (rtgtoVerifyBtn) rtgtoVerifyBtn.disabled = !rtgto.ok || rtgtoVerifying || isRunning;
 
   const r = rtgtoLastResult;
   if (!r) {
-    rtgtoResult.innerHTML = rtgto.ok ? '' : `<span class="muted">${escapeHtml(t('rtgto_how_to_connect'))}</span>`;
+    rtgtoResult.innerHTML = rtgto.ok ? '' : `<span class="muted">${escapeHtml(t('rtgto_how_to_connect_short'))}</span>`;
     return;
   }
   if (r.error) {
