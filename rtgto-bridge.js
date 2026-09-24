@@ -103,6 +103,9 @@
   // 两个地方（侧边栏、后台）可能同时想核对，用一个带时间的软锁错开；锁超时防止卡死
   const LOCK_KEY = "ggRtgtoVerifying";
   const LOCK_MS = 2 * 60 * 1000;
+  // 点了下载之后 GG 要先在服务器上打包，浏览器过一会儿才开始下载。
+  // 这段时间里还没对上下载的点击先不核对（否则会被判成"没出现下载"去白补一次）。
+  const START_GRACE_MS = 3 * 60 * 1000;
 
   const storageGet = (keys) => new Promise((r) => chrome.storage.local.get(keys, r));
   const storageSet = (obj) => new Promise((r) => chrome.storage.local.set(obj, r));
@@ -153,8 +156,11 @@
     const downloads = Array.isArray(dl[DOWNLOADS_KEY]) ? dl[DOWNLOADS_KEY] : [];
     const attached = Ledger.attachDownloads(list, downloads);
     // 有点击时间（能和浏览器下载对上）、还没核对过或上次还在下载中的
+    const now = Date.now();
     let toSend = attached.filter((e) =>
-      e.status === "clicked" && e.clickedAtMs && (!e.verify || e.verify.status === "downloading"));
+      e.status === "clicked" && e.clickedAtMs && (!e.verify || e.verify.status === "downloading") &&
+      // 下载还没开始、但刚点不久：再等等
+      !(!e.download && now - e.clickedAtMs < START_GRACE_MS));
     if (o.onlyFinished) toSend = toSend.filter((e) => e.download && e.download.state !== "in_progress");
     if (!toSend.length) return { status: "nothing" };
 
@@ -231,6 +237,28 @@
     }
   };
 
+  /**
+   * 还在等的：点了但下载还没开始（宽限期内）、或正在下载 / 实时GTO 说还在下载。
+   * bytes 是正在下载的已收字节数，用来判断有没有进展。
+   */
+  Bridge.waitingDownloads = async function () {
+    const Ledger = (typeof window !== "undefined" && window.GG_LEDGER) || self.GG_LEDGER;
+    const [list, dl] = await Promise.all([Ledger.getAll(), storageGet([DOWNLOADS_KEY])]);
+    const attached = Ledger.attachDownloads(list, Array.isArray(dl[DOWNLOADS_KEY]) ? dl[DOWNLOADS_KEY] : []);
+    const now = Date.now();
+    const mine = attached.filter((e) => e.status === "clicked" && e.clickedAtMs);
+    const notStarted = mine.filter((e) => !e.verify && !e.download && now - e.clickedAtMs < START_GRACE_MS);
+    const downloading = mine.filter((e) => e.verify
+      ? e.verify.status === "downloading"
+      : e.download && e.download.state === "in_progress");
+    return {
+      notStarted: notStarted.length,
+      downloading: downloading.length,
+      bytes: downloading.reduce((n, e) => n + ((e.download && e.download.bytes) || 0), 0),
+    };
+  };
+
+  Bridge.START_GRACE_MS = START_GRACE_MS;
   Bridge.LAST_VERIFY_KEY = LAST_VERIFY_KEY;
   Bridge.LOCK_KEY = LOCK_KEY;
 

@@ -844,7 +844,27 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
+// 同步结束的收尾：把能核对的交给实时GTO 核一遍，并报告还在等的下载。
+// 下载要时间：content script 按这里报的"还在等几个 / 下了多少字节"判断有没有进展，
+// 有进展就接着等，而不是一到点就把没下完的判成缺失。
+async function verifyOnce(trigger) {
+  const R = self.GG_RTGTO;
+  const out = await R.verifyPending({ trigger });
+  const waiting = await R.waitingDownloads();
+  const h = out.status === 'not_connected' ? { ok: false } : await R.hello();
+  bgLog(out.status === 'error' ? 'warn' : 'info', 'rtgto',
+    `同步收尾核对：${out.status}，待下载开始 ${waiting.notStarted}，下载中 ${waiting.downloading}` +
+    `${h.ok ? '' : '（实时GTO 未连接）'}`);
+  return Object.assign({ status: out.status, error: out.error || null, counts: out.counts || null, connected: h.ok }, waiting);
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'rtgtoVerifyAll') {
+    verifyOnce(message.trigger || 'run_end')
+      .then(sendResponse)
+      .catch((e) => sendResponse({ status: 'error', error: String(e && e.message || e), connected: false }));
+    return true;
+  }
   if (message.action === 'ggDownloadClick') {
     storageSet({ [GG_LAST_CLICK_KEY]: Date.now() }).then(() => sendResponse({ ok: true }));
     return true;

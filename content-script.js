@@ -531,9 +531,163 @@ async function runAutomation() {
       logWarning("自动化流程被手动停止", "runAutomation");
       return;
     }
-    logSuccess("全部操作完成！", "runAutomation");
+    // 同步只保证"点了下载"。下没下到要等实时GTO 核对，缺的自动补，确认齐了才算完成。
+    currentStatus.isRunning = true;
+    const done = await completenessPhase(currentPageType());
+    if (stopFlag) {
+      logWarning("自动化流程被手动停止", "runAutomation");
+      return;
+    }
+    if (done.confirmed) {
+      logSuccess("全部完成：实时GTO 已确认下载完整", "runAutomation");
+      updateStatus("success", "全部完成：实时GTO 已确认下载完整");
+    } else {
+      updateStatus("warning", done.message);
+    }
   } catch (e) {
     logError(e, "runAutomation");
+  } finally {
+    currentStatus.isRunning = false;
+  }
+}
+
+// 最多自动补几轮：某段日期一直补不上（GG 那边就是下不下来）时不能无限循环
+const MAX_REPAIR_ROUNDS = 3;
+
+/** 让后台把能核对的下载交给实时GTO 核一遍；返回里带着还在等的下载数和已收字节。 */
+function verifyWithRtgto() {
+  return sendToBackground({ action: 'rtgtoVerifyAll', trigger: 'run_end' });
+}
+
+// 下载要时间：GG 先在服务器上打包，浏览器再下载，大文件还要下一阵。
+// 只要还有进展（新下载开始、字节在涨、核对结果在变）就一直等；
+// 连续 NO_PROGRESS_MS 没动静或总共等满 MAX_WAIT_MS 才停，停下时如实说还有几个没核完。
+const VERIFY_POLL_MS = 5000;
+const NO_PROGRESS_MS = 4 * 60 * 1000;
+const MAX_WAIT_MS = 30 * 60 * 1000;
+
+async function waitForVerification() {
+  const started = Date.now();
+  let lastChange = Date.now();
+  let lastSig = '';
+  for (;;) {
+    const v = await verifyWithRtgto();
+    if (!v || v.ok === false || v.connected === false || v.status === 'error') return v;
+    const waiting = (v.notStarted || 0) + (v.downloading || 0);
+    if (v.status !== 'busy' && !waiting) return v;
+    const sig = `${v.status}|${v.notStarted}|${v.downloading}|${v.bytes}`;
+    if (sig !== lastSig) {
+      lastSig = sig;
+      lastChange = Date.now();
+    }
+    const secs = Math.round((Date.now() - started) / 1000);
+    if (Date.now() - lastChange > NO_PROGRESS_MS || Date.now() - started > MAX_WAIT_MS) {
+      logWarning(`等下载 ${secs} 秒仍有 ${waiting} 个没完成，先停止等待`, "ledger");
+      return Object.assign({}, v, { timedOut: true });
+    }
+    updateStatus("info",
+      `等待 ${waiting} 个文件下载完成并核对（已等 ${secs} 秒` +
+      `${v.notStarted ? `，其中 ${v.notStarted} 个 GG 还在准备` : ''}）…`);
+    if (secs === 0 || secs % 30 < VERIFY_POLL_MS / 1000) {
+      log(`等待下载：还没开始 ${v.notStarted || 0}，下载中 ${v.downloading || 0}（${Math.round((v.bytes || 0) / 1024)} KB）`, "ledger");
+    }
+    await wait(VERIFY_POLL_MS);
+    if (stopFlag) return v;
+  }
+}
+
+function storageGet(keys) {
+  return new Promise((resolve) => chrome.storage.local.get(keys, (r) => resolve(r || {})));
+}
+
+/**
+ * 当前分类还要补下载的日期段（按实时GTO 的核对结果和下载记录现算）。
+ * 超出 GG 保留期的补不了；晚于同步进度的交给下次同步。
+ */
+async function planRepairFor(pageType) {
+  const [list, st, saved] = await Promise.all([
+    GG_LEDGER.getAll(),
+    storageGet(['ggDownloads', 'ggRepairImport']),
+    GG_SYNC.get(pageType),
+  ]);
+  const attached = GG_LEDGER.attachDownloads(list, st.ggDownloads || []);
+  const pending = GG_LEDGER.summarize(attached)
+    .filter(c => c.pageType === pageType && c.pending.length)
+    .map(c => ({ pageType, kind: c.kind, ranges: c.pending }));
+  const imp = st.ggRepairImport;
+  const imported = imp && Array.isArray(imp.items)
+    ? GG_LEDGER.outstanding(imp.items, attached, imp.importedAt).filter(c => c.pageType === pageType)
+    : [];
+  const today = L.today();
+  const clamp = (kind) => ({
+    min: L.fmt(kind === 'summary' ? L.earliestSummaryDate(today) : L.earliestHistoryDate(today)),
+    max: saved.lastSyncedDate || '0000-00-00',
+  });
+  const plan = GG_LEDGER.planRepair(pending.concat(imported), pageType, clamp);
+  // 还没核完的（下载中 / 从没核对过）：这些没结果前不能说"齐了"
+  plan.unverified = attached.filter(x =>
+    x.pageType === pageType && x.status === 'clicked' && x.clickedAtMs &&
+    (!x.verify || x.verify.status === 'downloading')).length;
+  return plan;
+}
+
+/**
+ * 同步之后的收尾：核对 -> 缺的自动补下载 -> 再核对，直到实时GTO 确认没有缺的。
+ * 返回 { confirmed, message }。
+ */
+async function completenessPhase(pageType) {
+  const rangeText = (g) => g.ranges.map(r => r.from === r.to ? r.from : `${r.from}~${r.to}`).join('，');
+  for (let round = 0; ; round++) {
+    if (stopFlag) return { confirmed: false, message: '已停止' };
+    updateStatus("info", round === 0 ? "同步完成，等待实时GTO 核对下载…" : `第 ${round} 轮补下载完成，等待实时GTO 核对…`);
+    log(`等待实时GTO 核对（第 ${round + 1} 次）`, "ledger");
+    const v = await waitForVerification();
+    if (!v || v.ok === false || v.connected === false) {
+      const message = '没有连上实时GTO，无法确认下载是否完整。请打开实时GTO「GG数据导入」后再点一次开始同步。';
+      logWarning(message, "ledger");
+      return { confirmed: false, message };
+    }
+    if (v.status === 'error') {
+      const message = `实时GTO 核对出错：${v.error || '-'}`;
+      logWarning(message, "ledger");
+      return { confirmed: false, message };
+    }
+
+    const plan = await planRepairFor(pageType);
+    for (const g of plan.expired) {
+      logWarning(`${g.kind === 'summary' ? '游戏概览' : '历史手牌'} ${rangeText(g)} 已超出 GG 保留期，没法再补`, "ledger");
+    }
+    if (!plan.segments.length) {
+      if (plan.unverified) {
+        const message = `还有 ${plan.unverified} 个下载实时GTO 没核对完（可能还在下载），稍后再点一次开始同步确认。`;
+        logWarning(message, "ledger");
+        return { confirmed: false, message };
+      }
+      if (plan.notSynced.length) {
+        const message = `有日期同步失败（${plan.notSynced.map(rangeText).join('；')}），下次同步会从那里继续。`;
+        logWarning(message, "ledger");
+        return { confirmed: false, message };
+      }
+      logSuccess(round === 0
+        ? '实时GTO 已确认：这一分类的下载全部完整'
+        : `实时GTO 已确认：补下载 ${round} 轮后全部完整`, "ledger");
+      return { confirmed: true, message: '' };
+    }
+    if (round >= MAX_REPAIR_ROUNDS) {
+      const message = `自动补下载 ${round} 轮后仍有 ${plan.segments.length} 段没下到：` +
+        plan.segments.map(s => `${s.from}~${s.to}`).join('，');
+      logWarning(message, "ledger");
+      return { confirmed: false, message };
+    }
+    logWarning(
+      `实时GTO 核对发现 ${plan.segments.length} 段没下到，自动补下载（第 ${round + 1} 轮）：` +
+      plan.segments.map(s => `${s.from}~${s.to}[${s.kinds.join('+')}]`).join('，'),
+      "repair"
+    );
+    const r = await repairSegments(plan.segments);
+    if (r.aborted) {
+      return { confirmed: false, message: stopFlag ? '已停止' : '补下载中断（页面操作失败），请刷新页面后再点开始同步' };
+    }
   }
 }
 
@@ -2208,14 +2362,6 @@ async function loopDownload(opts = {}) {
       "loopDownload"
     );
   }
-  // 扩展只能确认"点了下载"，网络中断导致的下载失败它感知不到，所以每轮结束都提醒核对
-  if (syncedBatches > 0) {
-    logWarning(
-      `扩展无法确认文件是否真正下载成功（网络中断时会静默失败）。` +
-      `请在侧边栏"下载记录"导出记录，并用实时GTO（RtGTO）分析模块核实下载完整性。`,
-      "ledger"
-    );
-  }
   currentStatus.isRunning = false;
   currentStatus.lastSyncedDate = finalState.lastSyncedDate || null;
   return { ok: contiguous };
@@ -2226,7 +2372,8 @@ async function loopDownload(opts = {}) {
  *   [{ from, to, kinds: ['summary','history'] }]
  * 每段单独跑一遍 loopDownload（repair 模式），不改同步进度。
  */
-async function runRepair(segments) {
+/** 逐段补下载。返回 { okCount, ran, aborted }；aborted = 停止或页面操作连续失败。 */
+async function repairSegments(segments) {
   const type = currentPageType();
   const today = L.today();
   const minFor = {
@@ -2235,32 +2382,36 @@ async function runRepair(segments) {
   };
   let okCount = 0;
   let ran = 0;
-  try {
-    logSuccess(`开始补下载：${segments.length} 段（${type}）`, "repair");
-    for (const seg of segments) {
-      if (stopFlag) break;
-      // 侧边栏已经按 GG 窗口裁过，这里再兜一次：导入到补下载之间可能跨了天，窗口又往后滑了
-      const kinds = (seg.kinds || []).filter(k =>
-        (k === 'history' || L.pageConfig(type).hasSummary) && seg.to >= minFor[k]);
-      if (!kinds.length) {
-        logWarning(`${seg.from} ~ ${seg.to} 已超出 GG 保留期，无法补下载`, "repair");
-        continue;
-      }
-      // 起点取"最早还能下的那一类"的窗口起点；某类窗口更晚的部分，loopDownload 会按批次自己跳过
-      const earliest = kinds.map(k => minFor[k]).sort()[0];
-      const from = seg.from < earliest ? earliest : seg.from;
-      ran++;
-      currentStatus.isRunning = true;
-      const res = await loopDownload({ repair: true, from, to: seg.to, kinds });
-      // 没有返回值 = 停止或连续失败中止（页面结构不对），后面几段也不用试了
-      if (!res) break;
-      if (res.ok) okCount++;
+  logSuccess(`开始补下载：${segments.length} 段（${type}）`, "repair");
+  for (const seg of segments) {
+    if (stopFlag) return { okCount, ran, aborted: true };
+    // 规划时已按 GG 窗口裁过，这里再兜一次：规划到补下载之间可能跨了天，窗口又往后滑了
+    const kinds = (seg.kinds || []).filter(k =>
+      (k === 'history' || L.pageConfig(type).hasSummary) && seg.to >= minFor[k]);
+    if (!kinds.length) {
+      logWarning(`${seg.from} ~ ${seg.to} 已超出 GG 保留期，无法补下载`, "repair");
+      continue;
     }
+    // 起点取"最早还能下的那一类"的窗口起点；某类窗口更晚的部分，loopDownload 会按批次自己跳过
+    const earliest = kinds.map(k => minFor[k]).sort()[0];
+    const from = seg.from < earliest ? earliest : seg.from;
+    ran++;
+    currentStatus.isRunning = true;
+    const res = await loopDownload({ repair: true, from, to: seg.to, kinds });
+    // 没有返回值 = 停止或连续失败中止（页面结构不对），后面几段也不用试了
+    if (!res) return { okCount, ran, aborted: true };
+    if (res.ok) okCount++;
+  }
+  (okCount === ran ? logSuccess : logWarning)(`补下载结束：完成 ${okCount}/${ran} 段`, "repair");
+  return { okCount, ran, aborted: false };
+}
+
+/** 旧入口（侧边栏的 repair 消息）：补完直接收尾。现在补下载都在同步收尾阶段自动进行。 */
+async function runRepair(segments) {
+  try {
+    const r = await repairSegments(segments);
     if (stopFlag) {
-      logWarning(`补下载已停止（完成 ${okCount}/${segments.length} 段）`, "repair");
-    } else {
-      (okCount === ran ? logSuccess : logWarning)(`补下载结束：完成 ${okCount}/${ran} 段`, "repair");
-      logWarning(`请再用实时GTO（RtGTO）分析模块核对一次，确认漏下的部分已经补齐。`, "ledger");
+      logWarning(`补下载已停止（完成 ${r.okCount}/${segments.length} 段）`, "repair");
     }
   } catch (e) {
     logError(e, "runRepair");
@@ -2491,5 +2642,7 @@ function sendMessage(action, data = {}) {
   // 仅供自动化测试调用
   window.__test_loopDownload = loopDownload;
   window.__test_runRepair = runRepair;
+  window.__test_runAutomation = runAutomation;
+  window.__test_completenessPhase = completenessPhase;
   window.__test_stop = () => { stopFlag = true; };
 } // end __GG_DOWNLOADER_LOADED__ guard

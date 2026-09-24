@@ -58,9 +58,6 @@ function updateUI(status) {
   // 更新按钮状态
   pauseResumeBtn.disabled = !isRunning;
   // 同步/补下载共用一个运行状态：跑着的时候不能再开补下载
-  if (typeof repairStartBtn !== 'undefined' && repairStartBtn) {
-    repairStartBtn.disabled = isRunning || !repairSegments.length;
-  }
   if (typeof rtgtoVerifyBtn !== 'undefined' && rtgtoVerifyBtn) {
     rtgtoVerifyBtn.disabled = !rtgto.ok || rtgtoVerifying || isRunning;
   }
@@ -672,7 +669,6 @@ const repairImportBtn = document.getElementById('repair-import');
 const repairFile = document.getElementById('repair-file');
 const repairInfo = document.getElementById('repair-info');
 const repairActions = document.getElementById('repair-actions');
-const repairStartBtn = document.getElementById('repair-start');
 const repairClearBtn = document.getElementById('repair-clear');
 
 let repairImport = null;   // { importedAt, source, items }
@@ -717,11 +713,10 @@ function renderRepair() {
 
   if (!left.length) {
     lines.push(`<span class="ok">✓ ${escapeHtml(t('repair_all_done'))}</span>`);
-    repairStartBtn.style.display = 'none';
     repairInfo.innerHTML = lines.join('<br>');
+    syncStartWithRepair();
     return;
   }
-  repairStartBtn.style.display = '';
 
   const curType = currentPlan && currentPlan.pageType;
   // 当前分类放最前面
@@ -746,12 +741,26 @@ function renderRepair() {
     if (others.length) lines.push(escapeHtml(t('repair_switch_page', { pages: others.join(currentLang === 'zh' ? '、' : ', ') })));
   }
 
-  const days = repairSegments.reduce((n, s) => n + s.days, 0);
-  repairStartBtn.textContent = repairSegments.length
-    ? t('repair_start', { n: repairSegments.length, days })
-    : t('repair_nothing_here');
-  repairStartBtn.disabled = !repairSegments.length || isRunning;
+  if (repairSegments.length) {
+    const days = repairSegments.reduce((n, s) => n + s.days, 0);
+    lines.push(`<span class="cur">${escapeHtml(t('repair_auto_next', { n: repairSegments.length, days }))}</span>`);
+  }
   repairInfo.innerHTML = lines.join('<br>');
+  syncStartWithRepair();
+}
+
+// 补下载不再单独点：它是每次同步的收尾。所以已是最新、但还有要补的日期时，
+// 「开始同步」照样能点，点了就只做核对 + 补下载。
+function syncStartWithRepair() {
+  const plan = currentPlan && currentPlan.plan;
+  if (!plan || isRunning) return;
+  if (plan.nothingToDo) {
+    startStopBtn.disabled = !repairSegments.length;
+    syncPendingSpan.textContent = repairSegments.length
+      ? t('up_to_date_with_repair', { n: repairSegments.length })
+      : t('up_to_date');
+    syncPendingSpan.style.color = repairSegments.length ? '#fbbf24' : '#64748b';
+  }
 }
 
 repairImportBtn && repairImportBtn.addEventListener('click', () => repairFile.click());
@@ -782,18 +791,6 @@ repairFile && repairFile.addEventListener('change', function () {
     if (errors.length) console.warn('[侧边栏] 核对结果里有格式不对的条目：', errors);
   };
   reader.readAsText(file);
-});
-
-repairStartBtn && repairStartBtn.addEventListener('click', async function () {
-  if (isRunning || !repairSegments.length) return;
-  const segments = repairSegments.map(s => ({ from: s.from, to: s.to, kinds: s.kinds }));
-  announceRtgto();
-  const res = await sendMessage('repair', { segments });
-  if (!res || !res.accepted) return;
-  isRunning = true;
-  isPaused = false;
-  updateUI({ isRunning: true, isPaused: false });
-  renderRepair();
 });
 
 repairClearBtn && repairClearBtn.addEventListener('click', function () {
