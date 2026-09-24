@@ -81,16 +81,22 @@
       return cur;
     },
 
-    /** 清除某个页面类型的记录；不传就全清。下次同步会从 12 个月前重头来。 */
+    /**
+     * 只清除这一个分类（页面类型）的记录，其他分类不动。下次同步该分类从头来。
+     * 分类必须给：以前"不传就全清"，页面还没识别出分类时点清除会把所有分类都清掉。
+     */
     async clear(pageType) {
-      if (!pageType) {
-        await writeAll({});
-        return {};
-      }
+      if (!pageType) throw new Error("clear() 需要指定分类");
       const all = await readAll();
       delete all[pageType];
       await writeAll(all);
       return all;
+    },
+
+    /** 清除所有分类（目前界面上没有入口，留给调试用）。 */
+    async clearAll() {
+      await writeAll({});
+      return {};
     },
   };
 

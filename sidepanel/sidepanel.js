@@ -342,6 +342,12 @@ let currentPlan = null;   // 最近一次从页面拿到的同步计划
 function renderSyncCard(info) {
   currentPlan = info || null;
 
+  if (clearSyncBtn) {
+    clearSyncBtn.disabled = !info;
+    clearSyncBtn.textContent = info
+      ? t('clear_sync_page', { page: t(PAGE_TYPE_KEY[info.pageType] || 'badge_unknown') })
+      : t('clear_sync');
+  }
   if (!info) {
     syncPageTypeSpan.textContent = '—';
     syncBadgeSpan.textContent = t('badge_unknown');
@@ -523,12 +529,20 @@ clearSyncBtn && clearSyncBtn.addEventListener('click', async function() {
     statusDiv.style.color = '#d35400';
     return;
   }
-  const label = currentPlan ? t(PAGE_TYPE_KEY[currentPlan.pageType] || 'badge_unknown') : '';
-  if (!window.confirm(t('confirm_clear_sync', { page: label }))) return;
+  // 只清当前分类：分类都没识别出来就不清，免得误伤
+  if (!currentPlan || !currentPlan.pageType) {
+    setStatus(t('clear_sync_no_page'), '#d35400');
+    return;
+  }
+  const pageType = currentPlan.pageType;
+  const label = t(PAGE_TYPE_KEY[pageType] || 'badge_unknown');
+  const since = L.fmt(L.earliestSyncDate(pageType));
+  if (!window.confirm(t('confirm_clear_sync', { page: label, since }))) return;
 
-  await sendMessage('clearSync', currentPlan ? { pageType: currentPlan.pageType } : {});
+  const res = await sendMessage('clearSync', { pageType });
+  if (!res || !res.success) return;   // 失败原因已由 sendMessage 写进状态栏
   await refreshSyncCard();
-  statusDiv.textContent = t('sync_cleared');
+  statusDiv.textContent = t('sync_cleared', { page: label });
   statusDiv.style.color = '';
 });
 

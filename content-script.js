@@ -385,10 +385,15 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     return true;
   }
   if (message.action === "clearSync") {
+    // 只清当前分类：以侧边栏传来的为准，没传就用当前页面；都不明确就什么也不清
     const type = message.pageType || currentPageType();
+    if (!type) {
+      sendResponse && sendResponse({ error: '无法确定当前分类，没有清除任何同步记录' });
+      return;
+    }
     GG_SYNC.clear(type).then(() => {
-      log(`已清除 ${type} 的同步记录，下次将从 ${L.fmt(L.earliestSyncDate(type))} 重新开始`, "onMessage");
-      sendResponse && sendResponse({ success: true });
+      log(`已清除 ${type} 的同步记录（其他分类不受影响），下次将从 ${L.fmt(L.earliestSyncDate(type))} 重新开始`, "onMessage");
+      sendResponse && sendResponse({ success: true, pageType: type });
     });
     return true;
   }
