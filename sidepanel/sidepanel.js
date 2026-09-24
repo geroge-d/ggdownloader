@@ -884,12 +884,39 @@ function renderRtgto() {
   rtgtoResult.innerHTML = parts.join(' · ');
 }
 
+// 构建编号是打包时间 202609241630，显示成 2026-09-24 16:30
+function fmtBuild(build) {
+  const s = String(build || '');
+  if (s.length !== 12) return t('ext_build_unknown');
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)} ${s.slice(8, 10)}:${s.slice(10, 12)}`;
+}
+
+// 实时GTO 里内置的扩展比现在装的新，就提示更新
+const extUpdateBanner = document.getElementById('ext-update-banner');
+async function renderUpdateBanner() {
+  if (!extUpdateBanner || !Bridge) return;
+  const old = rtgto.ok ? await Bridge.outdated(rtgto.info) : null;
+  if (!old) {
+    extUpdateBanner.className = '';
+    extUpdateBanner.innerHTML = '';
+    return;
+  }
+  extUpdateBanner.className = 'show';
+  extUpdateBanner.innerHTML =
+    `<b>${escapeHtml(t('ext_update_title'))}</b>` +
+    escapeHtml(t('ext_update_desc', {
+      mine: fmtBuild(old.mine), latest: fmtBuild(old.latest),
+      mineVersion: old.mineVersion || '-', latestVersion: old.latestVersion || '-',
+    }));
+}
+
 async function pingRtgto() {
   if (!Bridge) return;
   const r = await Bridge.hello();
   const changed = r.ok !== rtgto.ok;
   rtgto = r;
   renderRtgto();
+  renderUpdateBanner();
   // 刚连上时把之前没核对的补核一次（比如同步时实时GTO还没打开）
   if (changed && r.ok && !isRunning) verifyWithRtgto(true, 'connected');
 }
@@ -1182,7 +1209,8 @@ function updateI18nText() {
   if (typeof renderSyncCard === 'function' && currentPlan) renderSyncCard(currentPlan);
   if (typeof renderRulesInfo === 'function' && lastRulesInfo) renderRulesInfo(lastRulesInfo);
   if (typeof renderLedger === 'function' && mainPanel.style.display === 'flex') renderLedger(lastLedger);
-  if (typeof renderRtgto === 'function') renderRtgto();   // 顺带重画补下载
+  if (typeof renderRtgto === 'function') renderRtgto();
+  if (typeof renderUpdateBanner === 'function') renderUpdateBanner();   // 顺带重画补下载
   // 按钮文字跟运行状态走：data-i18n 只写了静态文案，运行中切语言会被覆盖成"开始同步"
   startStopBtn.textContent = isRunning ? t('stop') : t('sync_now');
   pauseResumeBtn.textContent = isPaused ? t('resume') : t('pause');

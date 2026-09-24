@@ -19,8 +19,28 @@ EXCLUDE_DIRS = {".vscode", ".git", "node_modules", "__pycache__",
                 # 开发用的检查脚本，不打进扩展包
                 "tools"}
 EXCLUDE_FILES = {"README.md", ".gitignore", ".DS_Store", "build.py",
+                 # 每次打包现生成，见 write_build_info
+                 "build-info.json",
                  # 给服务端参考用的规则模板，运行时不需要打进包里
                  "pokercraft-rules.sample.json"}
+
+
+def make_build_info(version):
+    """版本号测试期间固定不变，所以另给一个构建编号（打包时间，越新越大）。
+    实时GTO 用它判断用户装的扩展是不是旧的：扩展报上自己的编号，
+    和实时GTO 内置的那份比，小了就提示更新。"""
+    import datetime
+    commit = ""
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=SRC,
+                                capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        pass
+    return {
+        "version": version,
+        "build": int(datetime.datetime.now().strftime("%Y%m%d%H%M")),
+        "commit": commit,
+    }
 
 
 def collect(src):
@@ -84,11 +104,17 @@ def main():
     out = os.path.join(os.path.dirname(SRC), "gg-download-%s.zip" % version)
 
     entries = collect(SRC)
+    build_info = make_build_info(version)
+    # 源码目录也放一份（已在 .gitignore），开发时直接加载源码目录也有构建编号
+    with open(os.path.join(SRC, "build-info.json"), "w", encoding="utf-8") as f:
+        json.dump(build_info, f, ensure_ascii=False, indent=2)
     if os.path.exists(out):
         os.remove(out)
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         for full, arc in entries:
             z.write(full, arc)
+        z.writestr("build-info.json", json.dumps(build_info, ensure_ascii=False, indent=2))
+    print("构建编号: %s（%s）" % (build_info["build"], build_info.get("commit") or "-"))
 
     names = verify(out, manifest)
 

@@ -32,12 +32,29 @@
     }
   }
 
+  // 构建编号（build.py 打包时写入 build-info.json）。版本号测试期间不变，
+  // 实时GTO 靠它判断这份扩展是不是比它内置的旧。没有这个文件（旧版扩展）按 0 算。
+  let buildInfo = null;
+  async function loadBuildInfo() {
+    if (buildInfo) return buildInfo;
+    try {
+      const res = await fetch(chrome.runtime.getURL("build-info.json"));
+      buildInfo = res.ok ? await res.json() : {};
+    } catch (e) {
+      buildInfo = {};
+    }
+    return buildInfo;
+  }
+
   async function request(p, path, opts, timeoutMs) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      // 顺带告诉实时GTO 扩展版本（它显示「扩展已连接（v…）」用）
-      const headers = Object.assign({ "X-GG-Extension": extVersion() || "1" }, (opts && opts.headers) || {});
+      // 顺带告诉实时GTO 扩展版本和构建编号（它据此显示「扩展已连接」和「版本过低」）
+      const b = await loadBuildInfo();
+      const headers = Object.assign(
+        { "X-GG-Extension": `${extVersion() || "1"}+${b.build || 0}` },
+        (opts && opts.headers) || {});
       const res = await fetch(`http://127.0.0.1:${p}${BASE}${path}`,
         Object.assign({ signal: ctrl.signal }, opts, { headers }));
       const body = await res.json().catch(() => null);
@@ -55,12 +72,44 @@
     PORTS,
     PROTOCOL,
 
+    /** 这份扩展的构建信息 { version, build, commit }；旧版扩展没有，build 为 0。 */
+    buildInfo: loadBuildInfo,
+
+    /**
+     * 实时GTO 内置的扩展是不是比这份新。hello 的回应里带着 bundledExtension。
+     * 返回 null 表示没法判断（实时GTO 太旧、没带这个信息）。
+     */
+    async outdated(helloInfo) {
+      const bundled = helloInfo && helloInfo.bundledExtension;
+      if (!bundled || (!bundled.build && !bundled.version)) return null;
+      const mine = (await loadBuildInfo()).build || 0;
+      const old = { mine, latest: bundled.build || 0, mineVersion: extVersion(), latestVersion: bundled.version || "" };
+      // 先比版本号：高于实时GTO 内置的不提醒，低于就提醒；相同再比构建编号的先后
+      const cmp = Bridge.compareVersions(extVersion(), bundled.version || "");
+      if (cmp > 0) return false;
+      if (cmp < 0) return old;
+      return mine < (bundled.build || 0) ? old : false;
+    },
+
+    /** "1.2.10" 和 "1.2.9" 按数字逐段比；返回 -1 / 0 / 1。空的算 0。 */
+    compareVersions(a, b) {
+      const pa = String(a || "").split(".").map((x) => parseInt(x, 10) || 0);
+      const pb = String(b || "").split(".").map((x) => parseInt(x, 10) || 0);
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const d = (pa[i] || 0) - (pb[i] || 0);
+        if (d) return d > 0 ? 1 : -1;
+      }
+      return 0;
+    },
+
     /** 找到正在运行的实时GTO。连不上返回 { ok: false }，不抛异常。 */
     async hello() {
       const order = port ? [port].concat(PORTS.filter((x) => x !== port)) : PORTS;
       for (const p of order) {
         try {
-          const info = await request(p, `/hello?ext=${encodeURIComponent(extVersion())}`, { method: "GET" }, HELLO_TIMEOUT_MS);
+          const b = await loadBuildInfo();
+          const info = await request(p,
+            `/hello?ext=${encodeURIComponent(extVersion())}&build=${b.build || 0}`, { method: "GET" }, HELLO_TIMEOUT_MS);
           if (info && info.app === "RtGTO") {
             port = p;
             return { ok: true, port: p, info };

@@ -391,8 +391,20 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       sendResponse && sendResponse({ error: '无法确定当前分类，没有清除任何同步记录' });
       return;
     }
-    GG_SYNC.clear(type).then(() => {
-      log(`已清除 ${type} 的同步记录（其他分类不受影响），下次将从 ${L.fmt(L.earliestSyncDate(type))} 重新开始`, "onMessage");
+    // 连同这个分类的补下载记录一起清：补下载清单是从下载记录（没下到的日期）和
+    // 待补清单算出来的，只清同步进度的话，从头同步完还会去补那些旧日期
+    Promise.all([
+      GG_SYNC.clear(type),
+      GG_LEDGER ? GG_LEDGER.update(list => list.filter(e => e.pageType !== type)) : null,
+      new Promise(resolve => chrome.storage.local.get(['ggRepairImport'], (r) => {
+        const imp = r && r.ggRepairImport;
+        if (!imp || !Array.isArray(imp.items)) return resolve();
+        const items = imp.items.filter(i => i.pageType !== type);
+        if (items.length) chrome.storage.local.set({ ggRepairImport: Object.assign({}, imp, { items }) }, resolve);
+        else chrome.storage.local.remove(['ggRepairImport'], resolve);
+      })),
+    ]).then(() => {
+      log(`已清除 ${type} 的同步记录和补下载记录（其他分类不受影响），下次将从 ${L.fmt(L.earliestSyncDate(type))} 重新开始`, "onMessage");
       sendResponse && sendResponse({ success: true, pageType: type });
     });
     return true;

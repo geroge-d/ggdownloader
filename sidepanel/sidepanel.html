@@ -308,6 +308,10 @@
     #rtgto-sync-hint { display: none; margin-top: 10px; padding: 7px 9px; border-radius: 7px; font-size: 12px; line-height: 1.6; }
     #rtgto-sync-hint.on { display: block; background: #1e3a2f66; border: 1px solid #2f5a45; color: var(--ok); }
     #rtgto-sync-hint.off { display: block; background: #3a2f1e55; border: 1px solid #5c4a24; color: var(--warn); }
+    #ext-update-banner { display: none; padding: 9px 11px; border-radius: 9px; background: #3a2f1e66;
+      border: 1px solid #7a5a1e; color: var(--warn); font-size: 12px; line-height: 1.6; }
+    #ext-update-banner.show { display: block; }
+    #ext-update-banner b { display: block; font-size: 13px; margin-bottom: 2px; }
     .rtgto-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; font-size: 12px; }
     .rtgto-status { color: var(--text-2); min-width: 0; }
     .rtgto-status::before { content: "● "; }
@@ -476,6 +480,8 @@
 
   <!-- 主界面 -->
   <div id="main-panel">
+    <!-- 扩展比实时GTO 内置的旧时提示更新 -->
+    <div id="ext-update-banner"></div>
     <!-- 同步状态 -->
     <div id="sync-card" class="card">
       <div class="sync-head">
