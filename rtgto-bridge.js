@@ -1,8 +1,8 @@
 // rtgto-bridge.js
 // 和同一台机器上的实时GTO（RtGTO）通信，核对下载是否完整。侧边栏使用。
 //
-// 实时GTO 在「手牌分析 / 资金分析 → GG数据导入」里开着一个只监听本机（127.0.0.1）的服务，
-// 只接受浏览器扩展发来的请求（看 Origin 是不是 chrome-extension://）。
+// 实时GTO 开着一个只监听本机（127.0.0.1）的服务，本机请求都接受，不做来源校验（本地便利通道）。
+// X-GG-Extension 头只是告诉它扩展版本。
 //
 //   GET  /gg-bridge/v1/hello   -> { app, protocol, appVersion, downloadDir, backupDir }
 //   POST /gg-bridge/v1/verify  -> 按每次"点了下载"对应的浏览器下载文件逐个核对，
@@ -36,7 +36,10 @@
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const res = await fetch(`http://127.0.0.1:${p}${BASE}${path}`, Object.assign({ signal: ctrl.signal }, opts));
+      // 顺带告诉实时GTO 扩展版本（它显示「扩展已连接（v…）」用）
+      const headers = Object.assign({ "X-GG-Extension": extVersion() || "1" }, (opts && opts.headers) || {});
+      const res = await fetch(`http://127.0.0.1:${p}${BASE}${path}`,
+        Object.assign({ signal: ctrl.signal }, opts, { headers }));
       const body = await res.json().catch(() => null);
       if (!res.ok) {
         const msg = (body && body.error) || `HTTP ${res.status}`;

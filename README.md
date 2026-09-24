@@ -119,8 +119,8 @@
 
 ### 和实时GTO 自动核对（同一台机器）
 
-实时GTO 的「手牌分析 / 资金分析 → GG数据导入」在 `127.0.0.1` 上监听（端口 47651，被占用时顺延到 47652、47653），
-只接受 `Origin: chrome-extension://…` 的请求。扩展侧的实现在 `rtgto-bridge.js`，实时GTO 侧在
+实时GTO 启动后在 `127.0.0.1` 上监听（端口 47651，被占用时顺延到 47652、47653），本机请求都接受，
+不做来源校验——这只是本机上的便利通道。扩展侧的实现在 `rtgto-bridge.js`，实时GTO 侧在
 `pokermaster/lib/modules/as/service/gg_bridge/`。
 
 1. 用户点 GG 的下载按钮时，content script 通知 background；background 用 `chrome.downloads`
