@@ -1,0 +1,5 @@
+{
+    "prettier.printWidth": 120,
+    "prettier.bracketSameLine": true,
+    "editor.defaultFormatter": "esbenp.prettier-vscode"  // 设置 Prettier 为默认格式化工具
+  }

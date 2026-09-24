@@ -1,0 +1,103 @@
+# build.py
+# 打包 Chrome 扩展 zip。
+#
+# 不要用 PowerShell 的 Compress-Archive：Windows PowerShell 5.1 会把子目录条目写成
+# "icons\icon16.png"（反斜杠），而 zip 规范要求正斜杠，Chrome 解包后会找不到
+# icons/ 和 sidepanel/ 下的文件。这里用 zipfile 显式指定 arcname。
+#
+#   python build.py            -> 输出到 ../gg-download-<version>.zip
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import zipfile
+
+SRC = os.path.dirname(os.path.abspath(__file__))
+EXCLUDE_DIRS = {".vscode", ".git", "node_modules", "__pycache__",
+                # 开发用的检查脚本，不打进扩展包
+                "tools"}
+EXCLUDE_FILES = {"README.md", ".gitignore", ".DS_Store", "build.py",
+                 # 给服务端参考用的规则模板，运行时不需要打进包里
+                 "pokercraft-rules.sample.json"}
+
+
+def collect(src):
+    entries = []
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        for name in sorted(files):
+            if name in EXCLUDE_FILES:
+                continue
+            full = os.path.join(root, name)
+            arc = os.path.relpath(full, src).replace(os.sep, "/")
+            entries.append((full, arc))
+    return entries
+
+
+def verify(zip_path, manifest):
+    """打完包自检：manifest 引用到的文件必须都在包里，且路径分隔符正确。"""
+    with zipfile.ZipFile(zip_path) as z:
+        names = set(z.namelist())
+
+    backslashed = [n for n in names if chr(92) in n]
+    if backslashed:
+        raise SystemExit("包内存在反斜杠路径，Chrome 无法读取: %s" % backslashed)
+
+    required = ["manifest.json"]
+    required += list(manifest.get("icons", {}).values())
+    required += list(manifest.get("action", {}).get("default_icon", {}).values())
+    if "background" in manifest:
+        required.append(manifest["background"]["service_worker"])
+    for cs in manifest.get("content_scripts", []):
+        required += cs.get("js", [])
+        required += cs.get("css", [])
+    if "side_panel" in manifest:
+        required.append(manifest["side_panel"]["default_path"])
+
+    missing = sorted({r for r in required if r not in names})
+    if missing:
+        raise SystemExit("manifest 引用的文件不在包里: %s" % missing)
+    return names
+
+
+def check_api():
+    """打包前跑接口检查：调用了不存在的函数就不许打包。"""
+    node = shutil.which("node")
+    script = os.path.join(SRC, "tools", "check_api.js")
+    if not node or not os.path.exists(script):
+        print("警告：未找到 node 或 tools/check_api.js，跳过接口检查")
+        return
+    r = subprocess.run([node, script], cwd=SRC)
+    if r.returncode != 0:
+        raise SystemExit("接口检查未通过，已中止打包")
+
+
+def main():
+    check_api()
+    manifest_path = os.path.join(SRC, "manifest.json")
+    with open(manifest_path, encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    version = manifest["version"]
+    out = os.path.join(os.path.dirname(SRC), "gg-download-%s.zip" % version)
+
+    entries = collect(SRC)
+    if os.path.exists(out):
+        os.remove(out)
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        for full, arc in entries:
+            z.write(full, arc)
+
+    names = verify(out, manifest)
+
+    print("输出: %s (%d bytes)" % (out, os.path.getsize(out)))
+    print("版本: %s  文件数: %d" % (version, len(names)))
+    for n in sorted(names):
+        print("   ", n)
+    print("自检通过：路径分隔符正确，manifest 引用的文件齐全")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
