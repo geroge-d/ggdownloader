@@ -20,8 +20,8 @@
   "use strict";
 
   const DEFAULT_RULES = {
-    version: 5,
-    updatedAt: "2026-09-23",
+    version: 6,
+    updatedAt: "2026-09-24",
     note: "Angular Material MDC (v15+/v19)",
 
     // 页面类型识别：正则字符串（不带斜杠），对 location.href 匹配
@@ -29,6 +29,8 @@
       tournament: "my\\.pokercraft\\.com/tournament",
       rushAndCash: "my\\.pokercraft\\.com/rush-and-cash",
       holdem: "my\\.pokercraft\\.com/holdem",
+      // 奥马哈：和德扑现金局一样只有手牌历史，筛选栏多一个"游戏"下拉，不影响按"日期"找下拉
+      plo: "my\\.pokercraft\\.com/plo(?:[/?#]|$)",
     },
 
     selectors: {

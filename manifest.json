@@ -20,7 +20,7 @@
     },
     {
       "matches": ["https://my.pokercraft.com/*", "https://*.ggpoker.com/*"],
-      "js": ["gg-limits.js", "sync-state.js", "pokercraft-rules.js", "pokercraft-dom.js", "content-script.js"]
+      "js": ["gg-limits.js", "sync-state.js", "download-ledger.js", "pokercraft-rules.js", "pokercraft-dom.js", "content-script.js"]
     }
   ],
   "action": {
@@ -41,7 +41,8 @@
   "host_permissions": [
     "https://my.pokercraft.com/*",
     "https://*.ggpoker.com/*",
-    "https://gateway.rtgto.net/*"
+    "https://gateway.rtgto.net/*",
+    "http://127.0.0.1/*"
   ],
   "web_accessible_resources": [{
     "resources": ["sidepanel/*"],

@@ -75,6 +75,72 @@
 6. 下载完成后：
    - 记录会保存在浏览器的下载目录中
 
+## 下载记录与补下载（对接实时GTO / RtGTO 分析模块）
+
+扩展只能确认用户**点了**下载按钮，无法确认文件是否真正下载成功（网络中断时会静默失败）。
+所以每段日期的处理结果都会记下来，交给实时GTO分析模块核对，漏下的再导回来补下载。
+
+1. 同步时自动记录（`download-ledger.js`，存在 `chrome.storage.local` 的 `ggDownloadLedger`）
+2. 侧边栏「下载记录」→ 导出 JSON / CSV
+3. 实时GTO分析模块核对，输出漏下的区间
+4. 侧边栏「导入核对结果」→「补下载当前分类」：只下漏掉的日期和类别，不改同步进度
+
+### 导出格式（`format: "gg-download-ledger"`）
+
+- `categories[]`：按 `pageType × kind` 汇总，`covered` 已处理、`clicked` 点过下载、`noData` 确认无对局、`pending` 失败且未补上的日期段
+- `entries[]`：逐条记录
+
+| 字段 | 说明 |
+| --- | --- |
+| `pageType` | `tournament` / `rushAndCash` / `holdem` / `plo` |
+| `kind` | `summary` 游戏概要（仅锦标赛）/ `history` 手牌历史 |
+| `from` `to` | PokerCraft 日期筛选的起止日，含首尾，浏览器本地时区 |
+| `status` | `clicked` 点了下载 / `no_data` 确认无对局 / `failed` 未完成 |
+| `count` | 点下载时按钮上的条数 |
+| `chunk` `rowRange` | 单日超限按行拆分时的第几趟、哪几行 |
+| `availableFrom` | 当时 GG 还保留的最早日期（更早的本来就下不到） |
+| `mode` | `sync` 正常同步 / `repair` 补下载 |
+| `at` | 点击时间（带时区偏移） |
+
+### 导入格式（`format: "gg-missing-ranges"`）
+
+```json
+{
+  "format": "gg-missing-ranges",
+  "formatVersion": 1,
+  "missing": [
+    { "pageType": "tournament", "kind": "history", "from": "2026-07-01", "to": "2026-07-03" },
+    { "pageType": "plo", "from": "2026-08-10", "to": "2026-08-10" }
+  ]
+}
+```
+
+`kind` 省略表示两类都补（非锦标赛只有手牌）。超出 GG 保留期的部分无法补；晚于同步进度的部分交给正常同步。
+
+### 和实时GTO 自动核对（同一台机器）
+
+实时GTO 的「手牌分析 / 资金分析 → GG数据导入」在 `127.0.0.1` 上监听（端口 47651，被占用时顺延到 47652、47653），
+只接受 `Origin: chrome-extension://…` 的请求。扩展侧的实现在 `rtgto-bridge.js`，实时GTO 侧在
+`pokermaster/lib/modules/as/service/gg_bridge/`。
+
+1. 用户点 GG 的下载按钮时，content script 通知 background；background 用 `chrome.downloads`
+   记下之后 15 分钟内开始的下载（`ggDownloads`：文件路径、完成 / 中断）。
+2. 侧边栏按点击时间把下载对到每条 `clicked` 记录上（`GG_LEDGER.attachDownloads`）。
+3. 每轮同步 / 补下载结束（或刚连上实时GTO 时），侧边栏 `POST /gg-bridge/v1/verify`：
+
+   ```json
+   { "protocol": 1, "extensionVersion": "1.2.0", "downloadDir": "C:\\Users\\me\\Downloads",
+     "entries": [ { "id": "…", "pageType": "tournament", "kind": "history", "from": "2026-07-01", "to": "2026-07-10",
+                    "count": 95, "download": { "file": "C:\\…\\000001a0-….zip", "state": "complete" } } ] }
+   ```
+
+4. 实时GTO 逐个打开文件：下完没有、能否读取、类型对不对、文件数和按钮上的条数是否一致；
+   导入并移动到备份目录后返回每条的 `status`（`ok` / `count_diff` / `downloading` / `interrupted` /
+   `not_detected` / `file_missing` / `unreadable` / `wrong_kind`）和 `missing`（`gg-missing-ranges` 格式）。
+5. 扩展把结果写回记录（`verify` 字段），没下到的日期自动进「补下载」清单。
+
+开始同步时侧边栏会探测实时GTO 是否打开，并提示去「GG数据导入」查看核对状态。
+
 ## 技术架构
 
 - **前端界面**：
@@ -161,7 +227,14 @@
 
 ## 打包说明
 
-切换到该工程目录下，执行如下命令生成发布包：
+在工程目录下执行（会先做接口检查，输出 `../gg-download-<版本>.zip`）：
 ```shell
-Compress-Archive -Path * -DestinationPath ..\gg-download.zip
+python build.py
+```
+不要用 `Compress-Archive`：它写出的 zip 路径分隔符是反斜杠，Chrome 加载会失败。
+
+实时GTO 内置了一份扩展（「GG数据导入」→「安装GG数据下载扩展」解压到 `文档\RealtimeGTO\GGDownloadExtension`）。
+更新内置版本时加 `--copy-to`，把包复制成实时GTO 仓库里的 `assets/gg_extension/gg-download-extension.zip`：
+```shell
+python build.py --copy-to <实时GTO 仓库>/assets/gg_extension
 ```

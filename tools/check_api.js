@@ -23,7 +23,7 @@ const ctx = {
 ctx.window = ctx;
 ctx.self = ctx;
 vm.createContext(ctx);
-for (const f of ["gg-limits.js", "sync-state.js", "pokercraft-rules.js", "pokercraft-dom.js"]) {
+for (const f of ["gg-limits.js", "sync-state.js", "download-ledger.js", "rtgto-bridge.js", "pokercraft-rules.js", "pokercraft-dom.js"]) {
   vm.runInContext(fs.readFileSync(path.join(ROOT, f), "utf8"), ctx, { filename: f });
 }
 
@@ -32,6 +32,9 @@ const OBJS = {
   L: ctx.GG_LIMITS,
   D: ctx.GGDom,
   GG_SYNC: ctx.GG_SYNC,
+  GG_LEDGER: ctx.GG_LEDGER,
+  Ledger: ctx.GG_LEDGER,   // 侧边栏里的别名
+  Bridge: ctx.GG_RTGTO,    // 实时GTO 通信
   "window.GG_RULES": ctx.GG_RULES,
 };
 for (const [name, obj] of Object.entries(OBJS)) {
@@ -41,7 +44,7 @@ for (const [name, obj] of Object.entries(OBJS)) {
   }
 }
 
-const FILES = ["content-script.js", "sidepanel/sidepanel.js", "gg-limits.js", "pokercraft-dom.js"];
+const FILES = ["content-script.js", "sidepanel/sidepanel.js", "gg-limits.js", "pokercraft-dom.js", "download-ledger.js"];
 let problems = 0;
 let checked = 0;
 

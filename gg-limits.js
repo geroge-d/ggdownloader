@@ -302,6 +302,7 @@
       tournament:  { key: "tournament",  hasSummary: true  },
       rushAndCash: { key: "rushAndCash", hasSummary: false },
       holdem:      { key: "holdem",      hasSummary: false },
+      plo:         { key: "plo",         hasSummary: false },
     },
 
     pageConfig(pageType) {

@@ -98,6 +98,20 @@ def main():
         print("   ", n)
     print("自检通过：路径分隔符正确，manifest 引用的文件齐全")
 
+    # 实时GTO 内置了一份扩展（「GG数据导入」→「安装GG数据下载扩展」解压出来给用户加载）。
+    # python build.py --copy-to <实时GTO 仓库>/assets/gg_extension 会把这次打的包放进去，
+    # 固定文件名，实时GTO 那边不用跟着改版本号。
+    if "--copy-to" in sys.argv:
+        i = sys.argv.index("--copy-to")
+        if i + 1 >= len(sys.argv):
+            print("--copy-to 后面要跟目录")
+            return 1
+        dest_dir = sys.argv[i + 1]
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, "gg-download-extension.zip")
+        shutil.copyfile(out, dest)
+        print("已复制到: %s" % dest)
+
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -713,6 +713,89 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
+// ---------------------------------------------------------------- GG 下载跟踪
+//
+// 用户每点一次 GG 的下载按钮，content script 发一条 ggDownloadClick 过来。
+// 之后一段时间里浏览器开始的下载，都记下它的文件路径和最终状态（完成 / 中断）。
+// 侧边栏按时间顺序把下载和"点下载"那条记录对上（GG_LEDGER.attachDownloads），
+// 再交给实时GTO读取对应文件核对 —— 这样网络中断导致的下载失败也能发现。
+//
+// 只记点击之后 15 分钟内开始的下载，不记录用户其它无关的下载。
+
+const GG_DOWNLOADS_KEY = 'ggDownloads';
+const GG_LAST_CLICK_KEY = 'ggLastDownloadClickAt';
+const GG_DOWNLOAD_WINDOW_MS = 15 * 60 * 1000;
+const GG_DOWNLOADS_MAX = 300;
+
+// 串行化：onCreated / onChanged 可能连着来，读-改-写不能交错
+let ggDownloadsChain = Promise.resolve();
+
+function updateGgDownloads(mutator) {
+  ggDownloadsChain = ggDownloadsChain.then(async () => {
+    const r = await storageGet([GG_DOWNLOADS_KEY]);
+    const list = Array.isArray(r[GG_DOWNLOADS_KEY]) ? r[GG_DOWNLOADS_KEY] : [];
+    const next = mutator(list);
+    if (!next) return;
+    if (next.length > GG_DOWNLOADS_MAX) next.splice(0, next.length - GG_DOWNLOADS_MAX);
+    await storageSet({ [GG_DOWNLOADS_KEY]: next });
+  }).catch((e) => bgLog('error', 'download', `更新下载记录失败：${e && e.message}`));
+  return ggDownloadsChain;
+}
+
+function ggDownloadRecord(item) {
+  return {
+    id: item.id,
+    // 只留地址的前段，够判断来源就行
+    url: String(item.finalUrl || item.url || '').slice(0, 200),
+    file: item.filename || '',
+    state: item.state || 'in_progress',
+    error: item.error || null,
+    startTime: item.startTime ? Date.parse(item.startTime) : Date.now(),
+    endTime: item.endTime ? Date.parse(item.endTime) : null,
+    bytes: item.bytesReceived || 0,
+    totalBytes: item.totalBytes || 0,
+  };
+}
+
+if (chrome.downloads) {
+  chrome.downloads.onCreated.addListener(async (item) => {
+    // 扩展自己发起的下载（比如导出下载记录）不算
+    if (item.byExtensionId) return;
+    const r = await storageGet([GG_LAST_CLICK_KEY]);
+    const clickAt = r[GG_LAST_CLICK_KEY] || 0;
+    if (!clickAt || Date.now() - clickAt > GG_DOWNLOAD_WINDOW_MS) return;
+    const rec = ggDownloadRecord(item);
+    bgLog('info', 'download', `GG 下载开始 #${rec.id}（点击后 ${Math.round((Date.now() - clickAt) / 1000)} 秒）`);
+    updateGgDownloads((list) => list.filter((d) => d.id !== rec.id).concat([rec]));
+  });
+
+  chrome.downloads.onChanged.addListener((delta) => {
+    updateGgDownloads((list) => {
+      const d = list.find((x) => x.id === delta.id);
+      if (!d) return null;   // 不是我们跟踪的下载
+      if (delta.filename) d.file = delta.filename.current;
+      if (delta.state) d.state = delta.state.current;
+      if (delta.error) d.error = delta.error.current;
+      if (delta.endTime) d.endTime = Date.parse(delta.endTime.current);
+      if (delta.bytesReceived) d.bytes = delta.bytesReceived.current;
+      if (delta.totalBytes) d.totalBytes = delta.totalBytes.current;
+      if (delta.state && delta.state.current !== 'in_progress') {
+        const ok = delta.state.current === 'complete';
+        bgLog(ok ? 'ok' : 'warn', 'download',
+          `GG 下载 #${d.id} ${ok ? '完成' : '中断'}${d.error ? '：' + d.error : ''}（${d.file || '无文件名'}）`);
+      }
+      return list;
+    });
+  });
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'ggDownloadClick') {
+    storageSet({ [GG_LAST_CLICK_KEY]: Date.now() }).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+});
+
 // Service Worker 控制台里可以直接改规则地址，方便自测
 self.setRulesUrl = function (url) {
   return storageSet({ [RULES_URL_STORAGE_KEY]: url }).then(() => {

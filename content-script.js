@@ -72,6 +72,11 @@ const D = window.GGDom;
 const L = window.GG_LIMITS;
 // 同步水位线（sync-state.js）
 const GG_SYNC = window.GG_SYNC;
+// 下载记录（download-ledger.js）：每段日期的处理结果，导出给实时GTO分析模块核对完整性
+const GG_LEDGER = window.GG_LEDGER;
+if (!GG_LEDGER) {
+  console.error("[GGPoker助手] download-ledger.js 未加载，请检查 manifest.json 的 content_scripts 顺序");
+}
 if (!GG_SYNC) {
   console.error("[GGPoker助手] sync-state.js 未加载，请检查 manifest.json 的 content_scripts 顺序");
 }
@@ -89,6 +94,7 @@ const PAGE_CONFIGS = {
   tournament: { hasSummary: true },
   rushAndCash: { hasSummary: false },
   holdem: { hasSummary: false },
+  plo: { hasSummary: false },
 };
 
 function getPageTypeStrict() {
@@ -405,6 +411,24 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     log(`收到 start 指令（自动同步，区间与批次跨度都由插件决定）`, "onMessage");
     updateStatus("info", "开始自动同步");
     runAutomation();
+    sendResponse && sendResponse({ accepted: true });
+  } else if (message.action === "repair") {
+    // 按实时GTO的核对结果补下载：只下漏掉的区间和类别，不改同步进度
+    const segments = Array.isArray(message.segments) ? message.segments : [];
+    if (!segments.length) {
+      sendResponse && sendResponse({ error: '没有需要补下载的区间' });
+      return;
+    }
+    if (currentStatus.isRunning) {
+      sendResponse && sendResponse({ error: '正在同步中，请先停止' });
+      return;
+    }
+    stopFlag = false;
+    pauseFlag = false;
+    currentStatus.isRunning = true;
+    log(`收到 repair 指令：${segments.map(s => `${s.from}~${s.to}[${s.kinds.join('+')}]`).join('，')}`, "onMessage");
+    updateStatus("info", "开始补下载");
+    runRepair(segments);
     sendResponse && sendResponse({ accepted: true });
   } else if (message.action === "stop") {
     stopFlag = true;
@@ -847,7 +871,7 @@ async function selectAllAndVerify(rowCount, maxAttempts = 4) {
  * GG 的下载要用户手势才触发，所以这一步没法自动化；能做的是确保按钮真的
  * 可点、提示清楚、并且用户没点时如实记为"本批未完成"而不是悄悄跳过。
  */
-async function promptDownload(kind, expectedCount, startStr, endStr) {
+async function promptDownload(kind, expectedCount, startStr, endStr, rec) {
   const label = kind === 'summary' ? '游戏概要' : '历史手牌记录';
   const finder = kind === 'summary' ? D.findSummaryButton : D.findHistoryButton;
 
@@ -871,10 +895,24 @@ async function promptDownload(kind, expectedCount, startStr, endStr) {
       log(`请点击下载${label}（${startStr} ~ ${endStr}，共 ${count} 条）`, 'promptDownload');
       const clicked = await waitForUserClick(finder, kind, label, startStr, endStr, count);
       if (clicked) {
+        // 点击时刻要立刻告诉后台：浏览器随后开始的下载才能和这次点击对上，
+        // 之后才知道那个文件到底下完了还是中断了
+        const clickedAtMs = Date.now();
+        sendToBackground({ action: 'ggDownloadClick' });
         log(`已点击下载${label}`, 'promptDownload');
         // 点了按钮不等于下载完成：GG 可能紧接着弹一个确认/准备中的框。
         // 那个框没处理完就推进时间，这一批其实根本没下到。
         const dialogHandled = await waitForDownloadSettled(label);
+        // 点了就记一笔（哪怕弹窗还没处理完就被停止了，settled=false 如实标出）。
+        // 扩展看不到文件是否真的下成功，这条记录就是给实时GTO分析模块核对用的。
+        if (rec) {
+          recordLedger(rec, kind, 'clicked', {
+            count,
+            settled: !!dialogHandled,
+            clickedAtMs,
+            clickedAt: GG_LEDGER ? GG_LEDGER.localIso(clickedAtMs) : null,
+          });
+        }
         if (!dialogHandled) return false;   // 只有用户停止才会 false
         logSuccess(`下载${label}已完成`, 'promptDownload');
         return true;
@@ -912,6 +950,22 @@ async function promptDownload(kind, expectedCount, startStr, endStr) {
 
   logWarning(`等待下载${label}时被手动停止`, 'promptDownload');
   return false;
+}
+
+/**
+ * 往下载记录里写一条。rec 是本批的公共信息（runId/批次/日期/页面类型/GG 可下载起始日），
+ * 由 loopDownload 组好传下来；kind 决定用哪个"GG 可下载起始日"。
+ * 写记录失败不能影响下载流程，所以只打日志不抛。
+ */
+function recordLedger(rec, kind, status, extra) {
+  if (!GG_LEDGER || !rec) return;
+  const { summaryFrom, historyFrom, ...base } = rec;
+  const entry = Object.assign(base, {
+    kind,
+    status,
+    availableFrom: kind === 'summary' ? summaryFrom : historyFrom,
+  }, extra || {});
+  GG_LEDGER.add(entry).catch((e) => console.error('[GGPoker助手] 写下载记录失败', e));
 }
 
 /**
@@ -1135,7 +1189,9 @@ async function waitForTableSettledByTime(fpBefore, timeout = 60000) {
  * 每一趟都要用户点下载（和平时一样，不点不会继续）。
  * 全部趟次都完成才返回 true —— 只要有一趟没下，这一天就不算完，不能推进水位线。
  */
-async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow) {
+async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, rec, want = {}) {
+  const wantSummary = want.wantSummary !== false;
+  const wantHistory = want.wantHistory !== false;
   const total = D.findRowCheckboxes().length;
   if (!total) {
     logWarning("按行分批时找不到行复选框，放弃本批", "chunk");
@@ -1184,13 +1240,15 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow) {
     }
 
     const label = `${startStr}（第 ${i + 1}/${chunks} 趟，第 ${from + 1}-${to} 行）`;
-    if (currentPageConfig().hasSummary) {
-      const ok = await promptDownload('summary', sCount, label, endStr);
+    // 同一天拆成几趟，记录里标上第几趟、哪几行，核对时才知道这一天应该有几个文件
+    const chunkRec = rec && Object.assign({}, rec, { chunk: `${i + 1}/${chunks}`, rowRange: `${from + 1}-${to}` });
+    if (wantSummary && currentPageConfig().hasSummary) {
+      const ok = await promptDownload('summary', sCount, label, endStr, chunkRec);
       if (!ok) return false;
     }
     if (stopFlag) return false;
-    if (inHistoryWindow) {
-      const ok = await promptDownload('history', hCount, label, endStr);
+    if (inHistoryWindow && wantHistory) {
+      const ok = await promptDownload('history', hCount, label, endStr, chunkRec);
       if (!ok) return false;
     }
   }
@@ -1384,15 +1442,35 @@ function verifyFilterApplied(roundStart, roundEnd) {
   };
 }
 
-async function loopDownload() {
+/**
+ * 分批下载一段日期。
+ *
+ * 默认是正常同步：区间 = "上次同步到哪天的第二天 ~ 今天"，每批完成推进水位线。
+ * repair 模式（按实时GTO的核对结果补下载）：
+ *   opts = { repair: true, from, to, kinds: ['summary'|'history'...] }
+ *   只跑给定区间、只提示下载 kinds 里的类别，不碰水位线（同步进度）。
+ * 返回 { ok }：区间内每一批都完成才算 ok。
+ */
+async function loopDownload(opts = {}) {
+  const repair = !!opts.repair;
   const pageType = currentPageType();
   const realToday = L.today();
   const earliestSummary = L.earliestSummaryDate(realToday);
   const earliestHistory = L.earliestHistoryDate(realToday);
+  // 这一轮要下哪几类。正常同步两类都要（按页面和 GG 窗口再筛）；补下载只下漏掉的那类
+  const wantSummary = !opts.kinds || opts.kinds.includes('summary');
+  const wantHistory = !opts.kinds || opts.kinds.includes('history');
 
   // 同步区间不再由用户选，而是"上次同步到哪天的第二天 ~ 今天"
   const saved = await GG_SYNC.get(pageType);
-  const plan = L.planSync(saved.lastSyncedDate, realToday, pageType);
+  const plan = repair
+    ? {
+        from: opts.from,
+        to: opts.to,
+        days: L.diffDays(L.parse(opts.to), L.parse(opts.from)) + 1,
+        hasSummary: L.pageConfig(pageType).hasSummary,
+      }
+    : L.planSync(saved.lastSyncedDate, realToday, pageType);
 
   if (plan.staleWatermark) {
     logWarning(
@@ -1416,7 +1494,10 @@ async function loopDownload() {
 
   // 批次跨度自动调整，事先算不出总批次数，进度按天数报
   // 从旧往新跑，起点通常在 3 个月窗口之外，所以按概要的起步跨度
-  let span = L.initialSpan(start >= earliestHistory);
+  // 补下载的段通常只有几天，直接整段一批（超限会按密度自动缩），少让用户点几次下载
+  let span = repair
+    ? Math.min(L.AUTO.MAX_SPAN, spanDays)
+    : L.initialSpan(start >= earliestHistory);
   // 密度跟踪器：取最近几批的最大密度（密度会往上漂，保守些少重做），
   // 空批次不清除已知密度，只是逐步放宽上界。
   const density = L.makeDensityTracker();
@@ -1424,6 +1505,8 @@ async function loopDownload() {
   let lastCap = 0;
   let batchNo = 0;
   let syncedBatches = 0;
+  // 本次同步的标识，写进每条下载记录，方便核对时按"哪一次同步"分组
+  const runId = (repair ? 'repair ' : '') + (GG_LEDGER ? GG_LEDGER.localIso(Date.now()) : String(Date.now()));
 
   // 水位线的含义是"到这一天为止全都同步完了"。
   // 一旦有批次失败，后面即使成功也不能再推进水位线，
@@ -1498,7 +1581,14 @@ async function loopDownload() {
     return true;
   };
 
-  log(
+  if (repair) {
+    logSuccess(
+      `补下载 ${plan.from} ~ ${plan.to}（${spanDays} 天，只下` +
+      `${[wantSummary && plan.hasSummary ? '游戏概要' : '', wantHistory ? '手牌历史' : ''].filter(Boolean).join('+')}），` +
+      `不改动同步进度`,
+      "repair"
+    );
+  } else log(
     `${plan.resumed ? `接着上次（${saved.lastSyncedDate}）继续` : "首次同步"}：` +
     `${plan.from} ~ ${plan.to}（共 ${spanDays} 天，起步跨度 ${span} 天）；` +
     `手牌详情仅覆盖 ${L.fmt(earliestHistory)} 之后`,
@@ -1562,8 +1652,37 @@ async function loopDownload() {
     let batchSummary = 0;
     let batchHistory = 0;
 
+    // 下载记录的公共部分。rows 在判空/全选之后才知道，所以每次现取。
+    const batchRec = () => ({
+      mode: repair ? 'repair' : 'sync',
+      runId,
+      batch: batchNo,
+      pageType,
+      from: startStr,
+      to: endStr,
+      rows: batchRows || null,
+      summaryFrom: L.fmt(earliestSummary),
+      historyFrom: L.fmt(earliestHistory),
+    });
+    // 这一批按 GG 的限制"应该有"哪几类数据：概要只有 MTT 有且回溯 12 个月，手牌只回溯 3 个月
+    const expectedKinds = () => {
+      const kinds = [];
+      if (wantSummary && currentPageConfig().hasSummary && roundEnd >= earliestSummary) kinds.push('summary');
+      if (wantHistory && roundEnd >= earliestHistory) kinds.push('history');
+      return kinds;
+    };
+    // 流水账结局 -> 下载记录状态。点了下载的那几条已在 promptDownload 里记过；
+    // 这里补"确认没数据"和"没下成"两种，核对时才能区分"本来就没有"和"漏了"。
+    const LEDGER_STATUS = { '无数据': 'no_data', '失败': 'failed', '未下载': 'failed', '异常': 'failed', '中止': 'failed' };
+
     /** 写一条流水账。status 说明这批的结局，note 说明原因。 */
     const record = (status, note) => {
+      const ledgerStatus = LEDGER_STATUS[status];
+      if (ledgerStatus) {
+        for (const kind of expectedKinds()) {
+          recordLedger(batchRec(), kind, ledgerStatus, { note: note || status });
+        }
+      }
       const entry = {
         批次: batchNo,
         区间: `${startStr} ~ ${endStr}`,
@@ -1613,6 +1732,8 @@ async function loopDownload() {
     // downloaded：这一批是否真的下载了数据（无数据批次只推进水位线，不算数据同步）
     const commit = async (downloaded) => {
       syncedBatches++;
+      // 补下载补的是水位线以内的旧日期，水位线本来就在它后面，不能动
+      if (repair) return;
       if (!contiguous) {
         logWarning(`本批成功但前面有批次失败，暂不推进同步记录（仍停在失败点之前）`, "loopDownload");
         return;
@@ -1864,7 +1985,7 @@ async function loopDownload() {
           `${startStr} 单日就有 ${rowCount} 行，超过上限 ${cap}，改为按行分批下载`,
           "loopDownload"
         );
-        const ok = await downloadInChunks(cap, startStr, endStr, inHistoryWindow);
+        const ok = await downloadInChunks(cap, startStr, endStr, inHistoryWindow, batchRec(), { wantSummary, wantHistory });
         if (!ok) {
           if (stopFlag) { stopNow(); return; }
           contiguous = false;
@@ -1939,7 +2060,7 @@ async function loopDownload() {
           `${startStr} 单日就有 ${observed} 条，超过上限 ${capNow}，改为按行分批下载`,
           "limit"
         );
-        const ok = await downloadInChunks(capNow, startStr, endStr, inHistoryWindow);
+        const ok = await downloadInChunks(capNow, startStr, endStr, inHistoryWindow, batchRec(), { wantSummary, wantHistory });
         if (!ok) {
           if (stopFlag) { stopNow(); return; }
           contiguous = false;
@@ -1972,7 +2093,7 @@ async function loopDownload() {
           `${startStr} 单日就有 ${observed} 条，超过上限 ${cap}，改为按行分批下载`,
           "loopDownload"
         );
-        const ok = await downloadInChunks(cap, startStr, endStr, inHistoryWindow);
+        const ok = await downloadInChunks(cap, startStr, endStr, inHistoryWindow, batchRec(), { wantSummary, wantHistory });
         if (!ok) {
           if (stopFlag) { stopNow(); return; }
           contiguous = false;
@@ -1991,8 +2112,10 @@ async function loopDownload() {
       // 用户没点下载却把日期标记成已同步，下次就再也不会回来补这几天了。
       let allDownloaded = true;
 
-      if (currentPageConfig().hasSummary && roundEnd >= earliestSummary) {
-        const ok = await promptDownload('summary', summaryCount, startStr, endStr);
+      // 概要和手牌两类都有时，必须两个都点了才算这一批完成（allDownloaded），
+      // 只点了概要就停下，水位线和"上次数据同步"时间都不会动。
+      if (wantSummary && currentPageConfig().hasSummary && roundEnd >= earliestSummary) {
+        const ok = await promptDownload('summary', summaryCount, startStr, endStr, batchRec());
         if (!ok) allDownloaded = false;
       }
       if (stopFlag) { stopNow(); return; }   // 概要那步被停止了就别再弹手牌的提示
@@ -2004,8 +2127,10 @@ async function loopDownload() {
           `${L.HISTORY_MONTHS} 个月范围，本批只下概要`,
           "loopDownload"
         );
+      } else if (!wantHistory) {
+        log(`补下载只缺游戏概要，本批不下手牌`, "repair");
       } else {
-        const ok = await promptDownload('history', historyCount, startStr, endStr);
+        const ok = await promptDownload('history', historyCount, startStr, endStr, batchRec());
         if (!ok) allDownloaded = false;
       }
 
@@ -2060,6 +2185,15 @@ async function loopDownload() {
   }
 
   dumpJournal();
+  // 补下载只跑一段，结果交给 runRepair 汇总；运行状态也由它统一收尾
+  if (repair) {
+    const ok = contiguous && !stopFlag;
+    (ok ? logSuccess : logWarning)(
+      `补下载 ${plan.from} ~ ${plan.to}：${ok ? '已完成' : '有批次没完成，可稍后再补一次'}`,
+      "repair"
+    );
+    return { ok };
+  }
   const finalState = await GG_SYNC.get(pageType);
   if (contiguous) {
     logSuccess(
@@ -2074,8 +2208,66 @@ async function loopDownload() {
       "loopDownload"
     );
   }
+  // 扩展只能确认"点了下载"，网络中断导致的下载失败它感知不到，所以每轮结束都提醒核对
+  if (syncedBatches > 0) {
+    logWarning(
+      `扩展无法确认文件是否真正下载成功（网络中断时会静默失败）。` +
+      `请在侧边栏"下载记录"导出记录，并用实时GTO（RtGTO）分析模块核实下载完整性。`,
+      "ledger"
+    );
+  }
   currentStatus.isRunning = false;
   currentStatus.lastSyncedDate = finalState.lastSyncedDate || null;
+  return { ok: contiguous };
+}
+
+/**
+ * 按实时GTO核对出的漏下区间补下载。segments 由侧边栏按 GG_LEDGER.planRepair 切好：
+ *   [{ from, to, kinds: ['summary','history'] }]
+ * 每段单独跑一遍 loopDownload（repair 模式），不改同步进度。
+ */
+async function runRepair(segments) {
+  const type = currentPageType();
+  const today = L.today();
+  const minFor = {
+    summary: L.fmt(L.earliestSummaryDate(today)),
+    history: L.fmt(L.earliestHistoryDate(today)),
+  };
+  let okCount = 0;
+  let ran = 0;
+  try {
+    logSuccess(`开始补下载：${segments.length} 段（${type}）`, "repair");
+    for (const seg of segments) {
+      if (stopFlag) break;
+      // 侧边栏已经按 GG 窗口裁过，这里再兜一次：导入到补下载之间可能跨了天，窗口又往后滑了
+      const kinds = (seg.kinds || []).filter(k =>
+        (k === 'history' || L.pageConfig(type).hasSummary) && seg.to >= minFor[k]);
+      if (!kinds.length) {
+        logWarning(`${seg.from} ~ ${seg.to} 已超出 GG 保留期，无法补下载`, "repair");
+        continue;
+      }
+      // 起点取"最早还能下的那一类"的窗口起点；某类窗口更晚的部分，loopDownload 会按批次自己跳过
+      const earliest = kinds.map(k => minFor[k]).sort()[0];
+      const from = seg.from < earliest ? earliest : seg.from;
+      ran++;
+      currentStatus.isRunning = true;
+      const res = await loopDownload({ repair: true, from, to: seg.to, kinds });
+      // 没有返回值 = 停止或连续失败中止（页面结构不对），后面几段也不用试了
+      if (!res) break;
+      if (res.ok) okCount++;
+    }
+    if (stopFlag) {
+      logWarning(`补下载已停止（完成 ${okCount}/${segments.length} 段）`, "repair");
+    } else {
+      (okCount === ran ? logSuccess : logWarning)(`补下载结束：完成 ${okCount}/${ran} 段`, "repair");
+      logWarning(`请再用实时GTO（RtGTO）分析模块核对一次，确认漏下的部分已经补齐。`, "ledger");
+    }
+  } catch (e) {
+    logError(e, "runRepair");
+  } finally {
+    currentStatus.isRunning = false;
+    updateStatus(stopFlag ? "warning" : "success", stopFlag ? "补下载已停止" : "补下载结束");
+  }
 }
 
 function sendStatus(status, progress) {
@@ -2298,5 +2490,6 @@ function sendMessage(action, data = {}) {
 
   // 仅供自动化测试调用
   window.__test_loopDownload = loopDownload;
+  window.__test_runRepair = runRepair;
   window.__test_stop = () => { stopFlag = true; };
 } // end __GG_DOWNLOADER_LOADED__ guard
