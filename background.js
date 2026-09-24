@@ -1,6 +1,9 @@
 // background.js
 // GGPoker记录下载助手后台脚本
 
+// 下载记录和实时GTO 通信：后台在 GG 下载一完成就自动交给实时GTO 解析核对
+importScripts('download-ledger.js', 'rtgto-bridge.js');
+
 // 国际化字典和翻译函数
 const I18N = {
   zh: {
@@ -783,11 +786,63 @@ if (chrome.downloads) {
         const ok = delta.state.current === 'complete';
         bgLog(ok ? 'ok' : 'warn', 'download',
           `GG 下载 #${d.id} ${ok ? '完成' : '中断'}${d.error ? '：' + d.error : ''}（${d.file || '无文件名'}）`);
+        scheduleAutoVerify(`下载 #${d.id} ${ok ? '完成' : '中断'}`);
       }
       return list;
     });
   });
 }
+
+// —— 自动解析 ——
+//
+// 每个 GG 下载一完成（或中断），就把它交给实时GTO 解析核对，不等整轮同步结束。
+// 下载可能比"点了下载"那条记录先写好（content script 要等 GG 的弹窗处理完才记），
+// 所以记录写入时也再触发一次；两个触发靠防抖合并。
+// 实时GTO 没开、或关了自动解析时不发，留给侧边栏在同步结束 / 连上时一起核对。
+let autoVerifyTimer = null;
+let autoVerifyRunning = false;
+let autoVerifyAgain = false;
+
+function scheduleAutoVerify(reason) {
+  clearTimeout(autoVerifyTimer);
+  autoVerifyTimer = setTimeout(() => runAutoVerify(reason), 3000);
+}
+
+async function runAutoVerify(reason) {
+  if (!self.GG_RTGTO) return;
+  if (autoVerifyRunning) { autoVerifyAgain = true; return; }
+  autoVerifyRunning = true;
+  try {
+    const out = await self.GG_RTGTO.verifyPending({ onlyFinished: true, trigger: 'auto' });
+    if (out.status === 'done') {
+      const c = out.counts || {};
+      bgLog(c.bad ? 'warn' : 'ok', 'rtgto',
+        `自动解析（${reason}）：核对通过 ${c.ok || 0}，没下到 ${c.bad || 0}，下载中 ${c.downloading || 0}`);
+    } else if (out.status === 'error') {
+      bgLog('warn', 'rtgto', `自动解析失败（${reason}）：${out.error}`);
+    } else if (out.status !== 'nothing') {
+      bgLog('info', 'rtgto', `自动解析跳过（${reason}）：${out.status}`);
+    }
+  } catch (e) {
+    bgLog('error', 'rtgto', `自动解析异常：${e && e.message}`);
+  } finally {
+    autoVerifyRunning = false;
+    if (autoVerifyAgain) {
+      autoVerifyAgain = false;
+      scheduleAutoVerify('期间又有新下载');
+    }
+  }
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes.ggDownloadLedger) return;
+  // 只在新增了"点了下载"的记录时触发；核对结果写回记录不算（否则自己触发自己）
+  const before = changes.ggDownloadLedger.oldValue || [];
+  const after = changes.ggDownloadLedger.newValue || [];
+  if (after.length > before.length && after.slice(before.length).some((e) => e.status === 'clicked')) {
+    scheduleAutoVerify('新的下载记录');
+  }
+});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'ggDownloadClick') {

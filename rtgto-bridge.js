@@ -92,6 +92,145 @@
     },
   };
 
+  // —— 核对：侧边栏（手动 / 同步结束 / 刚连上）和后台（下载一完成就自动）共用 ——
+
+  const DOWNLOADS_KEY = "ggDownloads";
+  const LAST_VERIFY_KEY = "ggRtgtoLastVerify";
+  const REPAIR_KEY = "ggRepairImport";
+  // 两个地方（侧边栏、后台）可能同时想核对，用一个带时间的软锁错开；锁超时防止卡死
+  const LOCK_KEY = "ggRtgtoVerifying";
+  const LOCK_MS = 2 * 60 * 1000;
+
+  const storageGet = (keys) => new Promise((r) => chrome.storage.local.get(keys, r));
+  const storageSet = (obj) => new Promise((r) => chrome.storage.local.set(obj, r));
+  const storageRemove = (keys) => new Promise((r) => chrome.storage.local.remove(keys, r));
+
+  // 发给实时GTO 的字段：日期段、类别、点下载时的条数，以及浏览器下载的文件和状态
+  function pickForVerify(e) {
+    const d = e.download;
+    return {
+      id: e.id,
+      mode: e.mode,
+      pageType: e.pageType,
+      kind: e.kind,
+      from: e.from,
+      to: e.to,
+      count: e.count,
+      chunk: e.chunk,
+      clickedAt: e.clickedAt,
+      download: d ? {
+        id: d.id, file: d.file, state: d.state, error: d.error,
+        bytes: d.bytes, totalBytes: d.totalBytes, startTime: d.startTime, endTime: d.endTime,
+      } : null,
+    };
+  }
+
+  function describe(e) {
+    const d = e.download;
+    return `[扩展] ${e.pageType}/${e.kind} ${e.from}~${e.to}${e.chunk ? " 第" + e.chunk + "趟" : ""} ` +
+      `按钮 ${e.count == null ? "-" : e.count} 条，点击 ${e.clickedAt || "-"}，` +
+      (d ? `下载 #${d.id} ${d.state}${d.error ? "(" + d.error + ")" : ""} ${d.file || "(无文件名)"}` : "没有对上浏览器下载");
+  }
+
+  /**
+   * 把还没核对的"点了下载"交给实时GTO，结果写回下载记录，没下到的日期写进补下载清单。
+   *
+   * opts.onlyFinished  只发浏览器已经下完（或已中断）的 —— 后台"下载一完成就自动解析"用；
+   *                    这时若实时GTO 关了自动解析就不发，留到同步结束再一起核对。
+   * opts.trigger       记日志用：manual / run_end / connected / auto
+   *
+   * 返回 { status: 'nothing' | 'not_connected' | 'auto_off' | 'busy' | 'done' | 'error', counts, error }
+   */
+  Bridge.verifyPending = async function (opts) {
+    const o = Object.assign({ onlyFinished: false, trigger: "manual" }, opts || {});
+    const Ledger = (typeof window !== "undefined" && window.GG_LEDGER) || self.GG_LEDGER;
+    if (!Ledger) return { status: "error", error: "no ledger" };
+
+    const [list, dl] = await Promise.all([Ledger.getAll(), storageGet([DOWNLOADS_KEY])]);
+    const downloads = Array.isArray(dl[DOWNLOADS_KEY]) ? dl[DOWNLOADS_KEY] : [];
+    const attached = Ledger.attachDownloads(list, downloads);
+    // 有点击时间（能和浏览器下载对上）、还没核对过或上次还在下载中的
+    let toSend = attached.filter((e) =>
+      e.status === "clicked" && e.clickedAtMs && (!e.verify || e.verify.status === "downloading"));
+    if (o.onlyFinished) toSend = toSend.filter((e) => e.download && e.download.state !== "in_progress");
+    if (!toSend.length) return { status: "nothing" };
+
+    const lock = (await storageGet([LOCK_KEY]))[LOCK_KEY];
+    if (lock && Date.now() - lock < LOCK_MS) return { status: "busy" };
+
+    const h = await Bridge.hello();
+    if (!h.ok) return { status: "not_connected" };
+    if (o.onlyFinished && h.info && h.info.autoParse === false) return { status: "auto_off" };
+
+    await storageSet({ [LOCK_KEY]: Date.now() });
+    const sent = toSend.map(describe);
+    console.groupCollapsed(`[实时GTO核对] ${o.trigger}：发送 ${toSend.length} 条`);
+    sent.forEach((l) => console.log(l));
+    console.groupEnd();
+    const saveLog = (extra) => storageSet({
+      [LAST_VERIFY_KEY]: Object.assign({ at: Ledger.localIso(Date.now()), trigger: o.trigger, sent }, extra),
+    });
+    const done = downloads.find((d) => d.state === "complete" && d.file);
+    const downloadDir = done ? done.file.replace(/[\\/][^\\/]*$/, "") : null;
+
+    try {
+      const res = await Bridge.verify({
+        extensionVersion: extVersion() || null,
+        trigger: o.trigger,
+        downloadDir,
+        entries: toSend.map(pickForVerify),
+      });
+      const results = new Map((res.results || []).map((r) => [r.id, r]));
+      console.groupCollapsed(`[实时GTO核对] 结果 ${(res.results || []).length} 条`);
+      (res.log || []).forEach((l) => console.log("[实时GTO] " + l));
+      console.groupEnd();
+
+      const attachedById = new Map(attached.map((e) => [e.id, e]));
+      const at = Ledger.localIso(Date.now());
+      await Ledger.update((all) => all.map((e) => {
+        const a = attachedById.get(e.id);
+        const r = results.get(e.id);
+        if (!r && !(a && a.download)) return e;
+        const n = Object.assign({}, e);
+        if (a && a.download) n.download = a.download;   // 对上的下载固定下来，旧下载滚出列表后也不丢
+        if (r) {
+          n.verify = {
+            status: r.status, detail: r.detail || "", items: r.items == null ? null : r.items,
+            matchedBy: r.matchedBy || null, metrics: r.metrics || null, at,
+          };
+        }
+        return n;
+      }));
+
+      const count = (pred) => (res.results || []).filter(pred).length;
+      const counts = {
+        ok: count((r) => r.status === "ok" || r.status === "count_diff"),
+        bad: count((r) => Ledger.VERIFY_BAD.includes(r.status)),
+        downloading: count((r) => r.status === "downloading"),
+      };
+
+      // 所有类别里"没下到、之后也没补上"的日期段，直接变成补下载清单
+      const fresh = await Ledger.getAll();
+      const pending = Ledger.summarize(Ledger.attachDownloads(fresh, downloads))
+        .flatMap((c) => c.pending.map((r) => ({ pageType: c.pageType, kind: c.kind, from: r.from, to: r.to })));
+      if (pending.length) {
+        await storageSet({ [REPAIR_KEY]: { importedAt: Ledger.localIso(Date.now()), source: "rtgto", items: pending } });
+      }
+      await saveLog({ log: res.log || [], counts, imported: res.import || null });
+      return { status: "done", counts, imported: res.import || null };
+    } catch (e) {
+      const error = String((e && e.message) || e);
+      console.warn("[实时GTO核对] 失败", e);
+      await saveLog({ error });
+      return { status: "error", error };
+    } finally {
+      await storageRemove([LOCK_KEY]);
+    }
+  };
+
+  Bridge.LAST_VERIFY_KEY = LAST_VERIFY_KEY;
+  Bridge.LOCK_KEY = LOCK_KEY;
+
   if (typeof window !== "undefined") window.GG_RTGTO = Bridge;
   if (typeof self !== "undefined") self.GG_RTGTO = Bridge;
 })();

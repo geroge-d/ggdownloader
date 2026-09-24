@@ -707,7 +707,10 @@ function renderRepair() {
   }
 
   const lines = [
-    `<span class="muted">${escapeHtml(t('repair_source', { source: repairImport.source || '-', at: repairImport.importedAt.slice(0, 16).replace('T', ' ') }))}</span>`,
+    `<span class="muted">${escapeHtml(t('repair_source', {
+      source: repairImport.source === 'rtgto' ? t('repair_source_rtgto') : (repairImport.source || '-'),
+      at: repairImport.importedAt.slice(0, 16).replace('T', ' '),
+    }))}</span>`,
   ];
   const left = Ledger.outstanding(repairImport.items, lastLedger, repairImport.importedAt);
   repairActions.style.display = 'flex';
@@ -877,132 +880,68 @@ async function pingRtgto() {
   rtgto = r;
   renderRtgto();
   // 刚连上时把之前没核对的补核一次（比如同步时实时GTO还没打开）
-  if (changed && r.ok && !isRunning) verifyWithRtgto(true);
+  if (changed && r.ok && !isRunning) verifyWithRtgto(true, 'connected');
 }
 
-function readDownloads() {
-  return new Promise((resolve) => chrome.storage.local.get([DOWNLOADS_KEY], (r) => {
-    resolve(Array.isArray(r && r[DOWNLOADS_KEY]) ? r[DOWNLOADS_KEY] : []);
-  }));
+// 核对本身在 rtgto-bridge.js（Bridge.verifyPending），后台"下载一完成就自动解析"也用它。
+// 这里只负责触发和显示；结果（无论谁触发的）都从 storage 里的 ggRtgtoLastVerify 读。
+function applyLastVerify(v) {
+  if (!v) return;
+  rtgtoLastResult = v.error
+    ? { error: v.error }
+    : Object.assign({ imported: v.imported || null }, v.counts || { ok: 0, bad: 0, downloading: 0 });
+  renderRtgto();
 }
 
-// 发给实时GTO 的字段：日期段、类别、点下载时的条数，以及浏览器下载的文件和状态
-function pickForVerify(e) {
-  const d = e.download;
-  return {
-    id: e.id,
-    mode: e.mode,
-    pageType: e.pageType,
-    kind: e.kind,
-    from: e.from,
-    to: e.to,
-    count: e.count,
-    chunk: e.chunk,
-    clickedAt: e.clickedAt,
-    download: d ? {
-      id: d.id, file: d.file, state: d.state, error: d.error,
-      bytes: d.bytes, totalBytes: d.totalBytes, startTime: d.startTime, endTime: d.endTime,
-    } : null,
-  };
-}
+chrome.storage.local.get([Bridge ? Bridge.LAST_VERIFY_KEY : 'ggRtgtoLastVerify'], (r) => {
+  const v = r && r[Bridge ? Bridge.LAST_VERIFY_KEY : 'ggRtgtoLastVerify'];
+  if (v) applyLastVerify(v);
+});
 
-async function verifyWithRtgto(auto) {
+async function verifyWithRtgto(auto, trigger) {
   if (!Bridge || !Ledger || rtgtoVerifying || isRunning) return;
   clearTimeout(rtgtoRetryTimer);
-  const [list, downloads] = await Promise.all([Ledger.getAll(), readDownloads()]);
-  const attached = Ledger.attachDownloads(list, downloads);
-  // 只核对：有点击时间（这一版之后记的，能和浏览器下载对上）、还没核对过或上次还在下载中的
-  const toSend = attached.filter(e =>
-    e.status === 'clicked' && e.clickedAtMs && (!e.verify || e.verify.status === 'downloading'));
-  if (!toSend.length) {
-    if (!auto) setStatusHint(t('rtgto_nothing_to_verify'));
-    return;
-  }
-  if (!rtgto.ok) {
-    rtgto = await Bridge.hello();
-    if (!rtgto.ok) { renderRtgto(); return; }
-  }
-
   rtgtoVerifying = true;
   renderRtgto();
-  // 每条发出去的记录一行：日期、类别、按钮条数、对上的浏览器下载
-  const sent = toSend.map(e => {
-    const d = e.download;
-    return `[扩展] ${e.pageType}/${e.kind} ${e.from}~${e.to}${e.chunk ? ' 第' + e.chunk + '趟' : ''} ` +
-      `按钮 ${e.count == null ? '-' : e.count} 条，点击 ${e.clickedAt || '-'}，` +
-      (d ? `下载 #${d.id} ${d.state}${d.error ? '(' + d.error + ')' : ''} ${d.file || '(无文件名)'}` : '没有对上浏览器下载');
-  });
-  console.groupCollapsed(`[实时GTO核对] 发送 ${toSend.length} 条`);
-  sent.forEach(l => console.log(l));
-  console.groupEnd();
-  const saveVerifyLog = (extra) => chrome.storage.local.set({
-    ggRtgtoLastVerify: Object.assign({ at: Ledger.localIso(Date.now()), sent }, extra),
-  });
-  const done = downloads.find(d => d.state === 'complete' && d.file);
-  const downloadDir = done ? done.file.replace(/[\\/][^\\/]*$/, '') : null;
+  let out;
   try {
-    const res = await Bridge.verify({
-      extensionVersion: chrome.runtime.getManifest ? chrome.runtime.getManifest().version : null,
-      downloadDir,
-      entries: toSend.map(pickForVerify),
-    });
-    const results = new Map((res.results || []).map(r => [r.id, r]));
-    console.groupCollapsed(`[实时GTO核对] 结果 ${(res.results || []).length} 条`);
-    (res.log || []).forEach(l => console.log('[实时GTO] ' + l));
-    console.table((res.results || []).map(r => ({
-      id: r.id, 状态: r.status, 一致项: r.matchedBy || '', 详情: r.detail || '',
-      统计: r.metrics ? JSON.stringify(r.metrics) : '',
-    })));
-    console.groupEnd();
-    saveVerifyLog({ log: res.log || [] });
-    const attachedById = new Map(attached.map(e => [e.id, e]));
-    const at = Ledger.localIso(Date.now());
-    await Ledger.update(all => all.map(e => {
-      const a = attachedById.get(e.id);
-      const r = results.get(e.id);
-      if (!r && !(a && a.download)) return e;
-      const n = Object.assign({}, e);
-      if (a && a.download) n.download = a.download;   // 对上的下载固定下来，旧下载滚出列表后也不丢
-      if (r) {
-        n.verify = {
-          status: r.status, detail: r.detail || '', items: r.items == null ? null : r.items,
-          matchedBy: r.matchedBy || null, metrics: r.metrics || null, at,
-        };
-      }
-      return n;
-    }));
-
-    const count = (pred) => (res.results || []).filter(pred).length;
-    rtgtoLastResult = {
-      ok: count(r => r.status === 'ok' || r.status === 'count_diff'),
-      bad: count(r => Ledger.VERIFY_BAD.includes(r.status)),
-      downloading: count(r => r.status === 'downloading'),
-      imported: res.import || null,
-    };
-
-    // 所有类别里"没下到、之后也没补上"的日期段，直接变成补下载清单
-    const fresh = await Ledger.getAll();
-    const pending = Ledger.summarize(Ledger.attachDownloads(fresh, downloads))
-      .flatMap(c => c.pending.map(r => ({ pageType: c.pageType, kind: c.kind, from: r.from, to: r.to })));
-    if (pending.length) {
-      repairImport = { importedAt: Ledger.localIso(Date.now()), source: t('repair_source_rtgto'), items: pending };
-      chrome.storage.local.set({ [REPAIR_KEY]: repairImport });
-      renderRepair();
-    }
-    // 还在下载的过半分钟再核一次
-    if (rtgtoLastResult.downloading) rtgtoRetryTimer = setTimeout(() => verifyWithRtgto(true), 30000);
-  } catch (e) {
-    rtgtoLastResult = { error: e && e.message === 'not_connected' ? t('rtgto_not_connected') : String(e && e.message || e) };
-    console.warn('[实时GTO核对] 失败', e);
-    saveVerifyLog({ error: String(e && e.message || e) });
-    rtgto = { ok: false };
+    out = await Bridge.verifyPending({ trigger: trigger || (auto ? 'run_end' : 'manual') });
   } finally {
     rtgtoVerifying = false;
-    renderRtgto();
   }
+  if (out.status === 'nothing' && !auto) setStatusHint(t('rtgto_nothing_to_verify'));
+  if (out.status === 'not_connected') rtgto = { ok: false };
+  if (out.status === 'error') {
+    rtgtoLastResult = { error: out.error === 'not_connected' ? t('rtgto_not_connected') : out.error };
+    rtgto = { ok: false };
+  }
+  // 不只靠 storage.onChanged：自己核对完就直接把结果和补下载清单读回来显示
+  if (out.status === 'done' || out.status === 'error') {
+    chrome.storage.local.get([Bridge.LAST_VERIFY_KEY], (r) => applyLastVerify(r && r[Bridge.LAST_VERIFY_KEY]));
+    loadRepair();
+  }
+  // 还在下载的过半分钟再核一次
+  if (out.status === 'done' && out.counts && out.counts.downloading) {
+    rtgtoRetryTimer = setTimeout(() => verifyWithRtgto(true, 'retry'), 30000);
+  }
+  renderRtgto();
 }
 
 rtgtoVerifyBtn && rtgtoVerifyBtn.addEventListener('click', () => verifyWithRtgto(false));
+
+// 后台自动核对时侧边栏不在场：结果、"正在核对"、补下载清单都从 storage 变化里拿
+chrome.storage.onChanged && chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (Bridge && changes[Bridge.LAST_VERIFY_KEY]) applyLastVerify(changes[Bridge.LAST_VERIFY_KEY].newValue);
+  if (Bridge && changes[Bridge.LOCK_KEY]) {
+    rtgtoVerifying = !!changes[Bridge.LOCK_KEY].newValue;
+    renderRtgto();
+  }
+  if (changes[REPAIR_KEY]) {
+    repairImport = changes[REPAIR_KEY].newValue || null;
+    renderRepair();
+  }
+});
 
 // 下载状态变了（完成 / 中断），记录卡片跟着更新
 chrome.storage.onChanged && chrome.storage.onChanged.addListener((changes, area) => {
