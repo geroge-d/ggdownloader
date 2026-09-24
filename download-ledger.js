@@ -171,12 +171,21 @@
     VERIFY_BAD,
     effectiveStatus,
 
+    /** 等下载开始的宽限期从哪儿算：点击时刻；配错类型被解开后从解开时重新算。 */
+    graceStart(e) {
+      return Math.max(e.clickedAtMs || 0, e.unpinnedAtMs || 0);
+    },
+
     /**
      * 把浏览器下载（background.js 记的 ggDownloads）按时间对到"点了下载"的记录上。
      *
      * 用户是一次一次按顺序点的，每点一次 GG 就开始一个下载，所以按点击时间排好，
      * 每条取"点击后最早开始、还没被占用"的那个下载即可。已经对上的保持不变，只刷新状态。
      * 返回新数组，每条 clicked 记录多一个 download 字段（对不上的为 null）。
+     *
+     * 但下载不一定按点击顺序开始：手牌包大，GG 打包慢，下一批概要的下载可能先开始，
+     * 按先后配就会两两配反。实时GTO 核对后知道文件实际是什么（download.fileKind，
+     * 或配错后记在 rejectedDownloads 里），类型不符的下载不再配给这次点击。
      */
     attachDownloads(list, downloads) {
       const byId = new Map((downloads || []).map((d) => [d.id, d]));
@@ -189,13 +198,25 @@
           if (fresh) e.download = Object.assign({}, e.download, fresh);
         }
       }
+      // 实时GTO 告诉过我们的文件类型：summary / history / mixed
+      const knownKind = new Map();
+      for (const e of out) {
+        for (const r of e.rejectedDownloads || []) if (r && r.fileKind) knownKind.set(r.id, r.fileKind);
+        if (e.download && e.download.id != null && e.download.fileKind) knownKind.set(e.download.id, e.download.fileKind);
+      }
+      const fits = (e, d) => {
+        if ((e.rejectedDownloads || []).some((r) => r && r.id === d.id)) return false;
+        const k = knownKind.get(d.id);
+        return !k || k === "mixed" || k === e.kind;
+      };
       const pool = (downloads || []).filter((d) => !used.has(d.id)).sort((a, b) => a.startTime - b.startTime);
       const clicks = out
         .filter((e) => e.status === "clicked" && e.clickedAtMs && !(e.download && e.download.id != null))
         .sort((a, b) => a.clickedAtMs - b.clickedAtMs);
       const WINDOW = 15 * 60 * 1000;
       for (const e of clicks) {
-        const i = pool.findIndex((d) => d.startTime >= e.clickedAtMs - 3000 && d.startTime <= e.clickedAtMs + WINDOW);
+        const i = pool.findIndex((d) => d.startTime >= e.clickedAtMs - 3000 && d.startTime <= e.clickedAtMs + WINDOW &&
+          fits(e, d));
         if (i >= 0) {
           e.download = Object.assign({}, pool[i]);
           pool.splice(i, 1);

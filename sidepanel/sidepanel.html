@@ -382,16 +382,15 @@
     #status { white-space: pre-wrap; color: var(--text-3); font-size: 12px; }
     .log-line {
       display: flex;
-      gap: 6px;
-      padding: 1px 0;
-      font-family: ui-monospace, Consolas, monospace;
-      font-size: 11.5px;
+      gap: 8px;
+      padding: 2px 0;
+      font-size: 12px;
       line-height: 1.5;
       white-space: normal;
       word-break: break-word;
     }
-    .log-line .lt { color: var(--text-3); flex: 0 0 auto; }
-    .log-line .lc { color: #4b5566; flex: 0 0 auto; }
+    .log-line .lt { color: var(--text-3); flex: 0 0 auto; font-family: ui-monospace, Consolas, monospace; font-size: 11px; padding-top: 1px; }
+    .log-line .lm { flex: 1 1 auto; min-width: 0; }
     .log-line.error   .lm { color: var(--err); font-weight: 600; }
     .log-line.warning .lm { color: var(--warn); }
     .log-line.success .lm { color: var(--ok); }
@@ -553,7 +552,7 @@
       <!-- 分类明细不再显示，渲染仍在（补下载清单要用），只是隐藏 -->
       <div id="ledger-list" hidden></div>
       <details class="more">
-        <summary><span data-i18n="more_actions">更多操作</span> <span id="ledger-count"></span></summary>
+        <summary><span data-i18n="more_actions">更多操作</span></summary>
         <div class="ledger-actions">
           <button id="ledger-export-json" data-i18n="ledger_export_json">导出 JSON</button>
           <button id="ledger-export-csv" data-i18n="ledger_export_csv">导出 CSV</button>

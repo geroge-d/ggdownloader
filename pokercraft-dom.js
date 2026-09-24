@@ -554,8 +554,14 @@
   function downloadCount(button) {
     if (!button) return 0;
     const small = qsAny(R("downloadCountText"), button);
-    const m = small && small.textContent.match(/\d+/);
-    return m ? parseInt(m[0], 10) : 0;
+    return small ? parseCount(small.textContent) : 0;
+  }
+
+  // "8,411 游戏历史记录" 是 8411：只取开头一串数字会读成 8（线上核对就因此把按钮条数记错）。
+  // 千位分隔符可能是逗号、点、空格或撇号。
+  function parseCount(text) {
+    const m = String(text || "").match(/\d{1,3}(?:[,.\s  ']\d{3})+(?!\d)|\d+/);
+    return m ? parseInt(m[0].replace(/\D/g, ""), 10) : 0;
   }
 
   function isDownloadReady(button) {
@@ -817,6 +823,7 @@
     findSummaryButton,
     findHistoryButton,
     downloadCount,
+    parseCount,
     isDownloadReady,
     // 状态
     hasNoData,

@@ -151,10 +151,19 @@
   const REPAIR_KEY = "ggRepairImport";
   // 两个地方（侧边栏、后台）可能同时想核对，用一个带时间的软锁错开；锁超时防止卡死
   const LOCK_KEY = "ggRtgtoVerifying";
-  const LOCK_MS = 2 * 60 * 1000;
+  // 核对进行中每 30 秒续一次锁（导入上万手要几分钟）；扩展被关掉时锁 90 秒后自然失效
+  const LOCK_MS = 90 * 1000;
+  const LOCK_HEARTBEAT_MS = 30 * 1000;
+  // 核对过但结论可疑的（类型不符 / 没对上下载 / 条数不符）：多半是下载和点击配错了，
+  // 点击后 2 小时内再交给实时GTO 按文件内容重新配对，最多核 3 次
+  const RECHECK = ["wrong_kind", "not_detected", "count_diff"];
+  const RECHECK_MS = 2 * 60 * 60 * 1000;
+  const MAX_CHECKS = 3;
   // 点了下载之后 GG 要先在服务器上打包，浏览器过一会儿才开始下载。
   // 这段时间里还没对上下载的点击先不核对（否则会被判成"没出现下载"去白补一次）。
   const START_GRACE_MS = 3 * 60 * 1000;
+  // 同一次点击因"文件类型不符"最多解开重配几次
+  const MAX_UNPIN = 3;
 
   const storageGet = (keys) => new Promise((r) => chrome.storage.local.get(keys, r));
   const storageSet = (obj) => new Promise((r) => chrome.storage.local.set(obj, r));
@@ -173,6 +182,7 @@
       count: e.count,
       chunk: e.chunk,
       clickedAt: e.clickedAt,
+      clickedAtMs: e.clickedAtMs || null,
       download: d ? {
         id: d.id, file: d.file, state: d.state, error: d.error,
         bytes: d.bytes, totalBytes: d.totalBytes, startTime: d.startTime, endTime: d.endTime,
@@ -206,10 +216,12 @@
     const attached = Ledger.attachDownloads(list, downloads);
     // 有点击时间（能和浏览器下载对上）、还没核对过或上次还在下载中的
     const now = Date.now();
+    const recheck = (e) => e.verify && RECHECK.includes(e.verify.status) &&
+      (e.verify.checks || 1) < MAX_CHECKS && now - e.clickedAtMs < RECHECK_MS;
     let toSend = attached.filter((e) =>
-      e.status === "clicked" && e.clickedAtMs && (!e.verify || e.verify.status === "downloading") &&
+      e.status === "clicked" && e.clickedAtMs && (!e.verify || e.verify.status === "downloading" || recheck(e)) &&
       // 下载还没开始、但刚点不久：再等等
-      !(!e.download && now - e.clickedAtMs < START_GRACE_MS));
+      !(!e.download && now - Ledger.graceStart(e) < START_GRACE_MS));
     if (o.onlyFinished) toSend = toSend.filter((e) => e.download && e.download.state !== "in_progress");
     if (!toSend.length) return { status: "nothing" };
 
@@ -221,6 +233,7 @@
     if (o.onlyFinished && h.info && h.info.autoParse === false) return { status: "auto_off" };
 
     await storageSet({ [LOCK_KEY]: Date.now() });
+    let result = null;
     const sent = toSend.map(describe);
     console.groupCollapsed(`[实时GTO核对] ${o.trigger}：发送 ${toSend.length} 条`);
     sent.forEach((l) => console.log(l));
@@ -230,6 +243,16 @@
     });
     const done = downloads.find((d) => d.state === "complete" && d.file);
     const downloadDir = done ? done.file.replace(/[\\/][^\\/]*$/, "") : null;
+    // 下载不一定按点击顺序开始，按时间配的难免配错。把最近的 GG 下载都交给实时GTO，
+    // 它读文件内容（类型、条数）重新配。已经核对通过、这次不重核的那些下载不用给。
+    const sendIds = new Set(toSend.map((e) => e.id));
+    const settled = new Set(attached
+      .filter((e) => !sendIds.has(e.id) && e.download && e.download.id != null && e.verify && e.verify.status === "ok")
+      .map((e) => e.download.id));
+    const candidates = downloads
+      .filter((d) => !settled.has(d.id))
+      .map((d) => ({ id: d.id, file: d.file, state: d.state, error: d.error, startTime: d.startTime }));
+    const heartbeat = setInterval(() => { storageSet({ [LOCK_KEY]: Date.now() }); }, LOCK_HEARTBEAT_MS);
 
     try {
       const res = await Bridge.verify({
@@ -237,6 +260,7 @@
         trigger: o.trigger,
         downloadDir,
         entries: toSend.map(pickForVerify),
+        candidates,
       });
       const results = new Map((res.results || []).map((r) => [r.id, r]));
       console.groupCollapsed(`[实时GTO核对] 结果 ${(res.results || []).length} 条`);
@@ -245,18 +269,42 @@
 
       const attachedById = new Map(attached.map((e) => [e.id, e]));
       const at = Ledger.localIso(Date.now());
+      let unpinned = 0;
+      // 这一轮有配反的，同一轮"没对上下载"的结论也不可靠（它的下载可能正被配反的那条占着），先不记，重配后再核
+      const anyWrongKind = (res.results || []).some((r) => r.status === "wrong_kind");
+      const downloadsById = new Map(downloads.map((d) => [d.id, d]));
+      let repaired = 0;
       await Ledger.update((all) => all.map((e) => {
         const a = attachedById.get(e.id);
         const r = results.get(e.id);
-        if (!r && !(a && a.download)) return e;
+        if (!r) return e;
         const n = Object.assign({}, e);
         if (a && a.download) n.download = a.download;   // 对上的下载固定下来，旧下载滚出列表后也不丢
-        if (r) {
-          n.verify = {
-            status: r.status, detail: r.detail || "", items: r.items == null ? null : r.items,
-            matchedBy: r.matchedBy || null, metrics: r.metrics || null, at,
-          };
+        // 实时GTO 按文件内容重新配过：用它配的那个下载（没有合适的就先解开，等它自己的文件）
+        if (r.repaired) {
+          repaired++;
+          const d = r.downloadId != null ? downloadsById.get(r.downloadId) : null;
+          n.download = d ? Object.assign({}, d) : null;
+          if (!d) n.unpinnedAtMs = Date.now();
         }
+        // 文件类型不对：多半是下载没按点击顺序开始、和相邻那次点击配反了（手牌包打包慢）。
+        // 不算漏下，解开重新配：记下这个文件是什么，下次配对跳过它。同一条最多解开几次，防止打转。
+        if (r.status === "wrong_kind" && !r.repaired && a && a.download && (e.rejectedDownloads || []).length < MAX_UNPIN) {
+          const fileKind = r.fileKind || (e.kind === "summary" ? "history" : "summary");
+          n.rejectedDownloads = (e.rejectedDownloads || []).concat([{ id: a.download.id, fileKind, file: a.download.file || null }]);
+          n.download = null;
+          delete n.verify;
+          n.unpinnedAtMs = Date.now();
+          unpinned++;
+          return n;
+        }
+        if (r && r.status === "not_detected" && anyWrongKind && !(a && a.download)) return n;
+        if (r && r.fileKind && n.download) n.download = Object.assign({}, n.download, { fileKind: r.fileKind });
+        n.verify = {
+          status: r.status, detail: r.detail || "", items: r.items == null ? null : r.items,
+          matchedBy: r.matchedBy || null, metrics: r.metrics || null, at,
+          checks: ((e.verify && e.verify.checks) || 0) + 1,
+        };
         return n;
       }));
 
@@ -274,16 +322,26 @@
       if (pending.length) {
         await storageSet({ [REPAIR_KEY]: { importedAt: Ledger.localIso(Date.now()), source: "rtgto", items: pending } });
       }
-      await saveLog({ log: res.log || [], counts, imported: res.import || null });
-      return { status: "done", counts, imported: res.import || null };
+      const log = (res.log || []).slice();
+      if (repaired) log.push(`[扩展] 实时GTO 按文件内容重新配对了 ${repaired} 次点击的下载`);
+      if (unpinned) log.push(`[扩展] ${unpinned} 个下载和点击配反了（文件类型不符），已按文件类型重新配对再核对`);
+      await saveLog({ log, counts, imported: res.import || null, unpinned, repaired });
+      result = { status: "done", counts, imported: res.import || null, unpinned, repaired };
     } catch (e) {
       const error = String((e && e.message) || e);
       console.warn("[实时GTO核对] 失败", e);
       await saveLog({ error });
       return { status: "error", error };
     } finally {
+      clearInterval(heartbeat);
       await storageRemove([LOCK_KEY]);
     }
+    // 解开了配反的：马上按类型重新配一次再核对，配反的另一方往往就在手边
+    if (result.unpinned && (o.depth || 0) < 2) {
+      const again = await Bridge.verifyPending(Object.assign({}, o, { depth: (o.depth || 0) + 1 }));
+      if (again.status === "done") return Object.assign({}, again, { unpinned: result.unpinned + (again.unpinned || 0) });
+    }
+    return result;
   };
 
   /**
@@ -296,7 +354,7 @@
     const attached = Ledger.attachDownloads(list, Array.isArray(dl[DOWNLOADS_KEY]) ? dl[DOWNLOADS_KEY] : []);
     const now = Date.now();
     const mine = attached.filter((e) => e.status === "clicked" && e.clickedAtMs);
-    const notStarted = mine.filter((e) => !e.verify && !e.download && now - e.clickedAtMs < START_GRACE_MS);
+    const notStarted = mine.filter((e) => !e.verify && !e.download && now - Ledger.graceStart(e) < START_GRACE_MS);
     const downloading = mine.filter((e) => e.verify
       ? e.verify.status === "downloading"
       : e.download && e.download.state === "in_progress");
@@ -305,6 +363,17 @@
       downloading: downloading.length,
       bytes: downloading.reduce((n, e) => n + ((e.download && e.download.bytes) || 0), 0),
     };
+  };
+
+  /**
+   * 实时GTO 此刻在做什么（给"等待核对"的进度条用）：
+   * { connected, verifying, queued, importing, processed, total, currentFile }
+   */
+  Bridge.progress = async function () {
+    const h = await Bridge.hello();
+    if (!h.ok) return { connected: false };
+    const p = (h.info && h.info.progress) || {};
+    return Object.assign({ connected: true, verifying: !!(h.info && h.info.busy) }, p);
   };
 
   Bridge.START_GRACE_MS = START_GRACE_MS;

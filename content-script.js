@@ -311,7 +311,7 @@ const IMPORTANT_LOG_MAX = 60;
 function isImportant(type, context) {
   if (type === "error" || type === "warning" || type === "success") return true;
   // 这几个上下文的 info 也值得留
-  return ["batch", "limit", "chunk", "rules", "selfCheck", "settle", "clicks"].includes(context);
+  return ["batch", "limit", "chunk", "rules", "selfCheck", "settle", "clicks", "ledger", "repair"].includes(context);
 }
 
 function pushImportant(type, message, context) {
@@ -634,13 +634,14 @@ async function finishRunStats() {
     : null;
   const parts = [part('概要', summary), part('手牌', history)].filter(Boolean);
   if (stat.clicks) {
-    log(
-      `点击统计：共点下载 ${stat.clicks} 次 = ${parts.join('，')}；理论最少约 ${stat.minClicks} 次。` +
+    // 详细统计进控制台和 ggClickStats（复制日志会带上），界面上只留一句
+    console.info(
+      `[GG助手] 点击统计：共点下载 ${stat.clicks} 次 = ${parts.join('，')}；理论最少约 ${stat.minClicks} 次。` +
       `批次 ${s.batches}（空 ${s.emptyBatches}），重做 ${redoTotal} 次` +
       (redoTotal ? `（${Object.entries(s.redos).map(([k, v]) => `${k}×${v}`).join('，')}）` : '') +
-      `，用时 ${stat.minutes} 分钟`,
-      "clicks"
+      `，用时 ${stat.minutes} 分钟`
     );
+    log(`本次共点下载 ${stat.clicks} 次（概要 ${summary ? summary.clicks : 0}，手牌 ${history ? history.clicks : 0}），用时 ${stat.minutes} 分钟`, "clicks");
   }
   try {
     const r = await new Promise(res => chrome.storage.local.get([CLICK_STATS_KEY], res));
@@ -728,7 +729,11 @@ async function runAutomation() {
     logError(e, "runAutomation");
   } finally {
     await finishRunStats();
+    // 要写回存储：侧边栏看存储里的状态，只改内存的话按钮会一直停在"停止 / 暂停"
     currentStatus.isRunning = false;
+    currentStatus.isPaused = false;
+    currentStatus.verifyWait = null;
+    chrome.storage.local.set({ ggpokerStatus: currentStatus });
   }
 }
 
@@ -747,33 +752,150 @@ const VERIFY_POLL_MS = 5000;
 const NO_PROGRESS_MS = 4 * 60 * 1000;
 const MAX_WAIT_MS = 30 * 60 * 1000;
 
+// —— 等实时GTO 核对时的模态进度框 ——
+// 实时GTO 导入上万手要几分钟，这段时间页面上什么都不动，用户以为卡死了。
+// 盖一层模态框显示进度（解析到第几个文件 / 还在等几个下载），期间页面和扩展都不能操作。
+const VERIFY_MODAL_ID = 'gg-verify-modal';
+const RTGTO_PROGRESS_POLL_MS = 1500;
+
+function blockKeys(ev) {
+  if (document.getElementById(VERIFY_MODAL_ID)) {
+    ev.stopPropagation();
+    ev.preventDefault();
+  }
+}
+
+function showVerifyModal() {
+  let el = document.getElementById(VERIFY_MODAL_ID);
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = VERIFY_MODAL_ID;
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-modal', 'true');
+  el.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.55);' +
+    'display:flex;align-items:center;justify-content:center;' +
+    'font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;';
+  el.innerHTML =
+    '<style>@keyframes gg-indet{0%{margin-left:-30%}100%{margin-left:100%}}</style>' +
+    '<div style="background:#fff;color:#222;border-radius:12px;padding:22px 26px;width:min(440px,calc(100vw - 32px));box-shadow:0 10px 40px rgba(0,0,0,.35)">' +
+    '<div style="font-size:16px;font-weight:600;margin-bottom:4px">正在等待实时GTO 核对下载</div>' +
+    '<div data-r="sub" style="font-size:12px;color:#666;margin-bottom:14px">请不要关闭页面，核对完成后自动继续</div>' +
+    '<div style="height:8px;background:#e8e8e8;border-radius:4px;overflow:hidden">' +
+    '<div data-r="bar" style="height:100%;width:30%;background:#2e7d32;border-radius:4px"></div></div>' +
+    '<div data-r="text" style="font-size:13px;margin-top:10px;min-height:18px">正在连接实时GTO…</div>' +
+    '<div data-r="file" style="font-size:12px;color:#888;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>' +
+    '</div>';
+  for (const type of ['click', 'dblclick', 'mousedown', 'mouseup', 'pointerdown', 'contextmenu']) {
+    el.addEventListener(type, (ev) => { ev.stopPropagation(); ev.preventDefault(); }, true);
+  }
+  document.addEventListener('keydown', blockKeys, true);
+  (document.body || document.documentElement).appendChild(el);
+  return el;
+}
+
+// fraction 为 null 时进度条来回滚动（不知道总量）
+function updateVerifyModal({ text, file, fraction, sub }) {
+  const el = document.getElementById(VERIFY_MODAL_ID);
+  if (el) {
+    const q = (r) => el.querySelector(`[data-r="${r}"]`);
+    q('text').textContent = text || '';
+    q('file').textContent = file || '';
+    if (sub) q('sub').textContent = sub;
+    const bar = q('bar');
+    if (fraction == null) {
+      bar.style.width = '30%';
+      bar.style.animation = 'gg-indet 1.4s linear infinite';
+    } else {
+      bar.style.animation = 'none';
+      bar.style.marginLeft = '0';
+      bar.style.width = `${Math.max(2, Math.min(100, Math.round(fraction * 100)))}%`;
+    }
+  }
+  // 侧边栏据此锁住按钮并显示同样的进度
+  currentStatus.verifyWait = { text: text || '', file: file || '', fraction: fraction == null ? null : fraction, at: Date.now() };
+  updateStatus("info", text || '等待实时GTO 核对…');
+}
+
+function hideVerifyModal() {
+  const el = document.getElementById(VERIFY_MODAL_ID);
+  if (el) el.remove();
+  document.removeEventListener('keydown', blockKeys, true);
+  currentStatus.verifyWait = null;
+  chrome.storage.local.set({ ggpokerStatus: currentStatus });
+}
+
+function describeVerifyWait(rt, v, secs) {
+  const base = (s) => String(s || '').split(/[\\/]/).pop();
+  const waiting = v ? (v.notStarted || 0) + (v.downloading || 0) : 0;
+  const queued = rt && rt.queued ? `，还有 ${rt.queued} 批排队` : '';
+  if (rt && rt.importing && rt.total > 0) {
+    return {
+      text: `实时GTO 正在解析导入：第 ${Math.min(rt.processed + 1, rt.total)} / ${rt.total} 个文件${queued}（已等 ${secs} 秒）`,
+      file: base(rt.currentFile),
+      fraction: rt.processed / rt.total,
+    };
+  }
+  if (rt && rt.verifying) {
+    return { text: `实时GTO 正在核对${queued}（已等 ${secs} 秒）`, file: '', fraction: null };
+  }
+  if (waiting) {
+    const mb = ((v.bytes || 0) / 1048576).toFixed(1);
+    return {
+      text: `等待 ${waiting} 个文件下载完成（GG 准备中 ${v.notStarted || 0}，下载中 ${v.downloading || 0}，已收 ${mb} MB；已等 ${secs} 秒）`,
+      file: '',
+      fraction: null,
+    };
+  }
+  return { text: `正在核对（已等 ${secs} 秒）`, file: '', fraction: null };
+}
+
 async function waitForVerification() {
   const started = Date.now();
   let lastChange = Date.now();
   let lastSig = '';
-  for (;;) {
-    const v = await verifyWithRtgto();
-    if (!v || v.ok === false || v.connected === false || v.status === 'error') return v;
-    const waiting = (v.notStarted || 0) + (v.downloading || 0);
-    if (v.status !== 'busy' && !waiting) return v;
-    const sig = `${v.status}|${v.notStarted}|${v.downloading}|${v.bytes}`;
-    if (sig !== lastSig) {
-      lastSig = sig;
-      lastChange = Date.now();
+  let lastV = null;
+  let rt = null;
+  const secs = () => Math.round((Date.now() - started) / 1000);
+  showVerifyModal();
+  const render = () => updateVerifyModal(describeVerifyWait(rt, lastV, secs()));
+  render();
+  // 核对请求本身可能一等几分钟（实时GTO 在导入），进度单独轮询
+  const poll = setInterval(async () => {
+    const p = await sendToBackground({ action: 'rtgtoProgress' });
+    if (p && p.connected) rt = p;
+    render();
+  }, RTGTO_PROGRESS_POLL_MS);
+  try {
+    for (;;) {
+      const v = await verifyWithRtgto();
+      lastV = v;
+      if (!v || v.ok === false || v.connected === false || v.status === 'error') return v;
+      if (v.progress) rt = Object.assign({ connected: true }, v.progress);
+      const waiting = (v.notStarted || 0) + (v.downloading || 0);
+      if (v.status !== 'busy' && !waiting) return v;
+      // 实时GTO 正在解析导入也算有进展（导入上万手要几分钟，之前会被当成没动静而放弃）
+      const rtBusy = rt && (rt.verifying || rt.importing || rt.queued);
+      const sig = `${v.status}|${v.notStarted}|${v.downloading}|${v.bytes}|${rt ? rt.processed : ''}`;
+      if (sig !== lastSig || rtBusy) {
+        lastSig = sig;
+        lastChange = Date.now();
+      }
+      if (Date.now() - lastChange > NO_PROGRESS_MS || Date.now() - started > MAX_WAIT_MS) {
+        logWarning(`等下载 ${secs()} 秒仍有 ${waiting} 个没完成，先停止等待`, "ledger");
+        return Object.assign({}, v, { timedOut: true });
+      }
+      render();
+      const s = secs();
+      if (s === 0 || s % 30 < VERIFY_POLL_MS / 1000) {
+        log(`等待核对：还没开始 ${v.notStarted || 0}，下载中 ${v.downloading || 0}（${Math.round((v.bytes || 0) / 1024)} KB）` +
+          `${rtBusy ? `，实时GTO 正在处理${rt.total ? `（${rt.processed}/${rt.total} 个文件）` : ''}` : ''}`, "ledger");
+      }
+      await wait(VERIFY_POLL_MS);
+      if (stopFlag) return v;
     }
-    const secs = Math.round((Date.now() - started) / 1000);
-    if (Date.now() - lastChange > NO_PROGRESS_MS || Date.now() - started > MAX_WAIT_MS) {
-      logWarning(`等下载 ${secs} 秒仍有 ${waiting} 个没完成，先停止等待`, "ledger");
-      return Object.assign({}, v, { timedOut: true });
-    }
-    updateStatus("info",
-      `等待 ${waiting} 个文件下载完成并核对（已等 ${secs} 秒` +
-      `${v.notStarted ? `，其中 ${v.notStarted} 个 GG 还在准备` : ''}）…`);
-    if (secs === 0 || secs % 30 < VERIFY_POLL_MS / 1000) {
-      log(`等待下载：还没开始 ${v.notStarted || 0}，下载中 ${v.downloading || 0}（${Math.round((v.bytes || 0) / 1024)} KB）`, "ledger");
-    }
-    await wait(VERIFY_POLL_MS);
-    if (stopFlag) return v;
+  } finally {
+    clearInterval(poll);
+    hideVerifyModal();
   }
 }
 
@@ -2428,7 +2550,9 @@ async function loopDownload(opts = {}) {
       const historyCount = selected.historyCount;
       batchSummary = summaryCount;
       batchHistory = historyCount;
-      const observed = Math.max(summaryCount, historyCount);
+      // 上限按行算。手牌按钮上的数可能是手数（上千），比行数大得多，拿它比行上限会一直判超限；
+      // 所以手牌按钮的数最多按列表行数算。
+      const observed = Math.max(summaryCount, Math.min(historyCount, rowCount || historyCount));
       log(`本批已选：概要 ${summaryCount} 条，手牌 ${historyCount} 条（上限 ${cap}）`, "loopDownload");
 
       // 7.5 页面有没有直接抱怨"选中数量超过允许的最大数量"。

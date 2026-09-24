@@ -62,6 +62,7 @@ function updateUI(status) {
     if (rtgtoVerifyBtn) rtgtoVerifyBtn.disabled = !rtgto.ok || rtgtoVerifying || isRunning;
   }
   
+  renderVerifyLock(status.verifyWait);
   // 更新状态显示
   renderLog(status);
   // 进度按"天"算：批次跨度会自动调整，总批次数事先算不出来
@@ -84,6 +85,43 @@ function updateUI(status) {
   if (text) text.textContent = `${percent}%`;
   if (totalRoundsSpan) totalRoundsSpan.textContent = totalRounds;
   if (currentRoundSpan) currentRoundSpan.textContent = currentRound;
+}
+
+// 等实时GTO 核对期间（页面上有模态进度框）侧边栏也整个锁住，显示同样的进度
+function renderVerifyLock(wait) {
+  let el = document.getElementById('verify-lock');
+  // 页面每 1.5 秒刷新一次；很久没刷新说明页面已关掉或刷新了，不能一直锁着
+  if (!wait || !wait.at || Date.now() - wait.at > 20000) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'verify-lock';
+    el.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(255,255,255,.92);' +
+      'display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center';
+    el.innerHTML =
+      '<style>@keyframes gg-indet{0%{margin-left:-30%}100%{margin-left:100%}}</style>' +
+      `<div style="font-size:15px;font-weight:600;margin-bottom:4px">${t('verify_lock_title')}</div>` +
+      `<div style="font-size:12px;color:#666;margin-bottom:14px">${t('verify_lock_sub')}</div>` +
+      '<div style="width:100%;max-width:320px;height:8px;background:#e8e8e8;border-radius:4px;overflow:hidden">' +
+      '<div data-r="bar" style="height:100%;width:30%;background:#2e7d32;border-radius:4px"></div></div>' +
+      '<div data-r="text" style="font-size:12px;margin-top:10px"></div>' +
+      '<div data-r="file" style="font-size:11px;color:#888;margin-top:4px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>';
+    el.addEventListener('click', (ev) => { ev.stopPropagation(); ev.preventDefault(); }, true);
+    document.body.appendChild(el);
+  }
+  el.querySelector('[data-r="text"]').textContent = wait.text || '';
+  el.querySelector('[data-r="file"]').textContent = wait.file || '';
+  const bar = el.querySelector('[data-r="bar"]');
+  if (wait.fraction == null) {
+    bar.style.width = '30%';
+    bar.style.animation = 'gg-indet 1.4s linear infinite';
+  } else {
+    bar.style.animation = 'none';
+    bar.style.marginLeft = '0';
+    bar.style.width = `${Math.max(2, Math.min(100, Math.round(wait.fraction * 100)))}%`;
+  }
 }
 
 // 定期更新状态
@@ -257,10 +295,10 @@ function renderLog(status) {
 
   statusDiv.innerHTML = entries
     .map((e) => {
-      const ctx = e.ctx ? `<span class="lc">[${escapeHtml(e.ctx)}]</span>` : '';
+      // 分类标签（[batch] 之类）只在"复制日志"里保留，界面上占地方又看不懂
       return (
-        `<div class="log-line ${e.type}">` +
-        `<span class="lt">${escapeHtml(e.t)}</span>${ctx}` +
+        `<div class="log-line ${e.type}"${e.ctx ? ` title="${escapeHtml(e.ctx)}"` : ''}>` +
+        `<span class="lt">${escapeHtml(String(e.t || '').slice(0, 5))}</span>` +
         `<span class="lm">${escapeHtml(e.msg)}</span></div>`
       );
     })
@@ -347,6 +385,8 @@ let currentPlan = null;   // 最近一次从页面拿到的同步计划
 
 function renderSyncCard(info) {
   currentPlan = info || null;
+  // 切换分类后，下载核对卡片也换成这个分类的情况
+  try { renderRtgto(); } catch (e) { /* 页面初始化时还没准备好，稍后会再画 */ }
 
   if (clearSyncBtn) {
     clearSyncBtn.disabled = !info;
@@ -584,7 +624,8 @@ function renderLedger(list) {
   ledgerExportJson.disabled = !has;
   ledgerExportCsv.disabled = !has;
   ledgerClear.disabled = !has;
-  ledgerCount.textContent = has ? t('ledger_entries', { n: lastLedger.length }) : '';
+  if (ledgerCount) ledgerCount.textContent = has ? t('ledger_entries', { n: lastLedger.length }) : '';
+  renderRtgto();
 
   if (!has) {
     ledgerList.innerHTML = `<div class="ledger-empty">${escapeHtml(t('ledger_empty'))}</div>`;
@@ -870,19 +911,32 @@ function renderRtgto() {
   if (rtgtoVerifyBtn) rtgtoVerifyBtn.disabled = !rtgto.ok || rtgtoVerifying || isRunning;
 
   const r = rtgtoLastResult;
-  if (!r) {
-    rtgtoResult.innerHTML = rtgto.ok ? '' : `<span class="muted">${escapeHtml(t('rtgto_how_to_connect_short'))}</span>`;
-    return;
-  }
-  if (r.error) {
+  if (r && r.error) {
     rtgtoResult.innerHTML = `<span class="bad">${escapeHtml(t('rtgto_verify_failed', { reason: r.error }))}</span>`;
     return;
   }
-  const parts = [`<span class="ok">${escapeHtml(t('rtgto_result_ok', { n: r.ok }))}</span>`];
-  if (r.bad) parts.push(`<span class="bad">${escapeHtml(t('rtgto_result_bad', { n: r.bad }))}</span>`);
-  if (r.downloading) parts.push(escapeHtml(t('rtgto_result_downloading', { n: r.downloading })));
-  if (r.imported) parts.push(escapeHtml(t('rtgto_result_imported', { hands: r.imported.newHands || 0, mtt: r.imported.mttSessions || 0 })));
-  rtgtoResult.innerHTML = parts.join(' · ');
+  // 显示当前分类的整体情况（按下载记录算），而不是最近一次核对那几个 ——
+  // 最近一次可能只核了 2 个，"核对通过 2 个"看着像只下到 2 个
+  const type = currentPlan && currentPlan.pageType;
+  const cats = type && Array.isArray(lastLedger) && lastLedger.length && Ledger
+    ? Ledger.summarize(lastLedger).filter(c => c.pageType === type) : [];
+  const sum = (k) => cats.reduce((n, c) => n + (Array.isArray(c[k]) ? c[k].length : (c[k] || 0)), 0);
+  const clicks = sum('downloadClicks');
+  if (!clicks) {
+    rtgtoResult.innerHTML = rtgto.ok ? '' : `<span class="muted">${escapeHtml(t('rtgto_how_to_connect_short'))}</span>`;
+    return;
+  }
+  const pending = sum('pending');
+  const waiting = sum('unverified');
+  const parts = [escapeHtml(t('rtgto_cat_clicks', { n: clicks }))];
+  if (pending) parts.push(`<span class="bad">${escapeHtml(t('rtgto_cat_pending', { n: pending }))}</span>`);
+  if (waiting) parts.push(escapeHtml(t('rtgto_cat_waiting', { n: waiting })));
+  if (!pending && !waiting) parts.push(`<span class="ok">${escapeHtml(t('rtgto_cat_all_ok'))}</span>`);
+  let html = parts.join(' · ');
+  if (r && r.imported && (r.imported.newHands || r.imported.mttSessions)) {
+    html += `<div class="muted" style="font-size:11px;margin-top:2px">${escapeHtml(t('rtgto_result_imported', { hands: r.imported.newHands || 0, mtt: r.imported.mttSessions || 0 }))}</div>`;
+  }
+  rtgtoResult.innerHTML = html;
 }
 
 // 构建编号是打包时间 202609241630，显示成 2026-09-24 16:30

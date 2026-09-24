@@ -855,7 +855,8 @@ async function verifyOnce(trigger) {
   bgLog(out.status === 'error' ? 'warn' : 'info', 'rtgto',
     `同步收尾核对：${out.status}，待下载开始 ${waiting.notStarted}，下载中 ${waiting.downloading}` +
     `${h.ok ? '' : '（实时GTO 未连接）'}`);
-  return Object.assign({ status: out.status, error: out.error || null, counts: out.counts || null, connected: h.ok }, waiting);
+  const progress = h.ok && h.info && h.info.progress ? h.info.progress : null;
+  return Object.assign({ status: out.status, error: out.error || null, counts: out.counts || null, connected: h.ok, progress }, waiting);
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -863,6 +864,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     verifyOnce(message.trigger || 'run_end')
       .then(sendResponse)
       .catch((e) => sendResponse({ status: 'error', error: String(e && e.message || e), connected: false }));
+    return true;
+  }
+  if (message.action === 'rtgtoProgress') {
+    self.GG_RTGTO.progress()
+      .then(sendResponse)
+      .catch(() => sendResponse({ connected: false }));
     return true;
   }
   if (message.action === 'ggDownloadClick') {
