@@ -311,7 +311,7 @@ const IMPORTANT_LOG_MAX = 60;
 function isImportant(type, context) {
   if (type === "error" || type === "warning" || type === "success") return true;
   // 这几个上下文的 info 也值得留
-  return ["batch", "limit", "chunk", "rules", "selfCheck", "settle"].includes(context);
+  return ["batch", "limit", "chunk", "rules", "selfCheck", "settle", "clicks"].includes(context);
 }
 
 function pushImportant(type, message, context) {
@@ -540,7 +540,170 @@ async function waitIfPaused() {
   }
 }
 
+// —— 点击统计：每轮记下点了几次下载、每次选了多少条、上限用了多少，用来分析怎么少点 ——
+
+const CLICK_STATS_KEY = 'ggClickStats';
+const CLICK_STATS_KEEP = 30;
+let runStats = null;
+
+function newRunStats(pageType) {
+  return {
+    pageType,
+    startedAt: Date.now(),
+    clicks: { summary: [], history: [] },   // 每次点击：{ count, cap, inHistory, mode }
+    batches: 0,
+    emptyBatches: 0,
+    days: 0,
+    redos: {},                              // 重做原因 -> 次数
+    capModel: null,                         // 手牌窗口的上限从哪来
+    currentCap: 0,
+    currentInHistory: false,
+    currentMode: 'sync',
+  };
+}
+
+function statClick(kind, count) {
+  if (!runStats || !runStats.clicks[kind]) return;
+  runStats.clicks[kind].push({
+    count: count || 0,
+    cap: runStats.currentCap,
+    inHistory: runStats.currentInHistory,
+    mode: runStats.currentMode,
+  });
+}
+
+function statBatch(status, note, days) {
+  if (!runStats) return;
+  if (status === '重做') {
+    // 原因里带着具体数字，只取前面的描述归类
+    const reason = String(note || '其他').replace(/[\d.,]+/g, 'N').slice(0, 18);
+    runStats.redos[reason] = (runStats.redos[reason] || 0) + 1;
+    return;
+  }
+  runStats.batches++;
+  runStats.days += days || 0;
+  if (status === '无数据') runStats.emptyBatches++;
+}
+
+/** 一轮结束：算出点击效率写进日志，并存下来（最近 30 轮）供分析。 */
+async function finishRunStats() {
+  const s = runStats;
+  runStats = null;
+  if (!s) return null;
+  const sum = (xs) => xs.reduce((a, b) => a + b, 0);
+  const describe = (list) => {
+    if (!list.length) return null;
+    const items = sum(list.map(c => c.count));
+    const withCap = list.filter(c => c.cap > 0);
+    return {
+      clicks: list.length,
+      items,
+      avgPerClick: Math.round(items / list.length),
+      // 每次选中条数 / 当时的上限：越接近 100% 点得越省
+      capUse: withCap.length
+        ? Math.round(100 * sum(withCap.map(c => c.count / c.cap)) / withCap.length) : null,
+      repairClicks: list.filter(c => c.mode === 'repair').length,
+    };
+  };
+  const summary = describe(s.clicks.summary);
+  const history = describe(s.clicks.history);
+  // 理论最少：概要一次最多 500 条；手牌一次最多 2 万手（按学到的每行手数折算）
+  const minSummary = summary ? Math.ceil(summary.items / L.SUMMARY_MAX_PER_DOWNLOAD) : 0;
+  const handsPerRow = s.capModel && s.capModel.handsPerRow;
+  const minHistory = history
+    ? Math.ceil(history.items * (handsPerRow || L.AUTO.HANDS_PER_SESSION_ESTIMATE) / L.HISTORY_MAX_HANDS_PER_DOWNLOAD)
+    : 0;
+  const redoTotal = sum(Object.values(s.redos));
+  const stat = {
+    at: GG_LEDGER ? GG_LEDGER.localIso(s.startedAt) : new Date(s.startedAt).toISOString(),
+    pageType: s.pageType,
+    minutes: Math.round((Date.now() - s.startedAt) / 60000),
+    clicks: (summary ? summary.clicks : 0) + (history ? history.clicks : 0),
+    summary, history,
+    minClicks: minSummary + minHistory,
+    batches: s.batches,
+    emptyBatches: s.emptyBatches,
+    days: s.days,
+    redos: s.redos,
+    redoTotal,
+    capModel: s.capModel,
+  };
+  const part = (name, d) => d
+    ? `${name} ${d.clicks} 次（平均 ${d.avgPerClick} 条/次${d.capUse == null ? '' : `，上限用了 ${d.capUse}%`}` +
+      `${d.repairClicks ? `，其中补下载 ${d.repairClicks} 次` : ''}）`
+    : null;
+  const parts = [part('概要', summary), part('手牌', history)].filter(Boolean);
+  if (stat.clicks) {
+    log(
+      `点击统计：共点下载 ${stat.clicks} 次 = ${parts.join('，')}；理论最少约 ${stat.minClicks} 次。` +
+      `批次 ${s.batches}（空 ${s.emptyBatches}），重做 ${redoTotal} 次` +
+      (redoTotal ? `（${Object.entries(s.redos).map(([k, v]) => `${k}×${v}`).join('，')}）` : '') +
+      `，用时 ${stat.minutes} 分钟`,
+      "clicks"
+    );
+  }
+  try {
+    const r = await new Promise(res => chrome.storage.local.get([CLICK_STATS_KEY], res));
+    const list = Array.isArray(r && r[CLICK_STATS_KEY]) ? r[CLICK_STATS_KEY] : [];
+    list.push(stat);
+    if (list.length > CLICK_STATS_KEEP) list.splice(0, list.length - CLICK_STATS_KEEP);
+    await new Promise(res => chrome.storage.local.set({ [CLICK_STATS_KEY]: list }, res));
+  } catch (e) {
+    console.warn('[GGPoker助手] 保存点击统计失败', e);
+  }
+  return stat;
+}
+
+/**
+ * 手牌窗口每批能选多少行。GG 限的是一次 2 万手，页面上看不到手数，原来只能按
+ * 每行 200 手保守估算（= 100 行），手牌窗口里的批次因此比外面多好几倍，点击也多好几倍。
+ * 实时GTO 每次核对都会报回下载里真实的手数：用它算"每行多少手"，取偏高的 90 分位
+ * 再留 10% 余量来定上限。样本不够时仍用老估算。
+ */
+// 每个分类上次同步量出来的密度（行/天）。下次同步第一批就按它定跨度，
+// 不然每次都从 3 天、14 天这种保守起步，小范围的增量同步也要拆成好几批、多点好几次。
+const DENSITY_KEY = 'ggDensity';
+const DENSITY_MAX_AGE_DAYS = 60;
+
+function loadDensity(pageType) {
+  return new Promise(resolve => chrome.storage.local.get([DENSITY_KEY], r => {
+    const d = r && r[DENSITY_KEY] && r[DENSITY_KEY][pageType];
+    if (!d || !(d.rate > 0) || Date.now() - d.at > DENSITY_MAX_AGE_DAYS * 86400e3) return resolve(null);
+    resolve(d);
+  }));
+}
+
+function saveDensity(pageType, rate) {
+  if (!(rate > 0)) return Promise.resolve();
+  return new Promise(resolve => chrome.storage.local.get([DENSITY_KEY], r => {
+    const all = (r && r[DENSITY_KEY]) || {};
+    all[pageType] = { rate: Math.round(rate * 100) / 100, at: Date.now() };
+    chrome.storage.local.set({ [DENSITY_KEY]: all }, resolve);
+  }));
+}
+
+const HANDS_MODEL_MIN_SAMPLES = 3;
+const HANDS_SAFETY = 0.9;
+
+async function learnHandsPerRow(pageType) {
+  if (!GG_LEDGER) return null;
+  const list = await GG_LEDGER.getAll();
+  const ratios = list
+    .filter(e => e.pageType === pageType && e.kind === 'history' && !e.chunk &&
+      e.rows > 0 && e.verify && (e.verify.status === 'ok' || e.verify.status === 'count_diff') &&
+      e.verify.metrics && e.verify.metrics.hands > 0)
+    .map(e => e.verify.metrics.hands / e.rows)
+    .sort((a, b) => a - b);
+  if (ratios.length < HANDS_MODEL_MIN_SAMPLES) return { samples: ratios.length, handsPerRow: null, cap: null };
+  const p90 = ratios[Math.min(ratios.length - 1, Math.ceil(ratios.length * 0.9) - 1)];
+  const mean = ratios.reduce((a, b) => a + b, 0) / ratios.length;
+  const cap = Math.max(20, Math.min(L.SUMMARY_MAX_PER_DOWNLOAD,
+    Math.floor(L.HISTORY_MAX_HANDS_PER_DOWNLOAD * HANDS_SAFETY / p90)));
+  return { samples: ratios.length, handsPerRow: Math.round(p90 * 10) / 10, mean: Math.round(mean * 10) / 10, cap };
+}
+
 async function runAutomation() {
+  runStats = newRunStats(currentPageType());
   try {
     logSuccess("开始自动化流程", "runAutomation");
     await loopDownload();
@@ -564,6 +727,7 @@ async function runAutomation() {
   } catch (e) {
     logError(e, "runAutomation");
   } finally {
+    await finishRunStats();
     currentStatus.isRunning = false;
   }
 }
@@ -1070,6 +1234,7 @@ async function promptDownload(kind, expectedCount, startStr, endStr, rec) {
         // 之后才知道那个文件到底下完了还是中断了
         const clickedAtMs = Date.now();
         sendToBackground({ action: 'ggDownloadClick' });
+        statClick(kind, count);
         log(`已点击下载${label}`, 'promptDownload');
         // 点了按钮不等于下载完成：GG 可能紧接着弹一个确认/准备中的框。
         // 那个框没处理完就推进时间，这一批其实根本没下到。
@@ -1676,6 +1841,11 @@ async function loopDownload(opts = {}) {
   let lastCap = 0;
   let batchNo = 0;
   let syncedBatches = 0;
+  // 防打转：上一次重做的日期段、连续重做同一段的次数、下一轮是否跳过按上限缩放
+  let lastRedoRange = '';
+  let sameRangeRedos = 0;
+  let skipRescale = false;
+  const MAX_SAME_RANGE_REDOS = 3;
   // 本次同步的标识，写进每条下载记录，方便核对时按"哪一次同步"分组
   const runId = (repair ? 'repair ' : '') + (GG_LEDGER ? GG_LEDGER.localIso(Date.now()) : String(Date.now()));
 
@@ -1700,6 +1870,47 @@ async function loopDownload(opts = {}) {
   // 而撞错那一批还得重做，白白浪费时间。
   let learnedCap = await loadLearnedCap();
   if (learnedCap) log(`沿用上次学到的选中上限：${learnedCap} 条`, "limit");
+
+  // 手牌窗口每批上限：有实时GTO 核对过的手数就按真实的算，否则按老估算
+  const handsModel = await learnHandsPerRow(pageType);
+  const historyCap = handsModel && handsModel.cap ? handsModel.cap : null;
+  const baseCap = (inHistory) =>
+    inHistory && historyCap ? historyCap : L.sessionCap(inHistory);
+  // 上次量出来的密度：第一批直接按它把这一批装到接近上限
+  const savedDensity = repair ? null : await loadDensity(pageType);
+  if (savedDensity) {
+    // effectiveCap 在后面才定义，这里直接套一下学到的选中上限
+    const base = baseCap(start >= earliestHistory);
+    const capStart = learnedCap ? Math.min(learnedCap, base) : base;
+    const fit = Math.max(L.AUTO.MIN_SPAN, Math.min(L.AUTO.MAX_SPAN,
+      Math.floor(capStart * L.AUTO.DENSITY_SAFETY / savedDensity.rate)));
+    if (fit > span) {
+      log(`按上次的密度（约 ${savedDensity.rate} 行/天）起步跨度从 ${span} 天放大到 ${fit} 天`, "clicks");
+      span = fit;
+    }
+  } else if (!repair && historyCap && start >= earliestHistory) {
+    // 从手牌窗口里开始的同步：上限放宽了多少倍，起步跨度也放大多少倍（超了只是重做，不多点）
+    const scaled = Math.min(L.AUTO.MAX_SPAN,
+      Math.round(span * historyCap / L.sessionCap(true)));
+    if (scaled > span) {
+      log(`手牌窗口上限放宽到 ${historyCap} 行，起步跨度从 ${span} 天放大到 ${scaled} 天`, "clicks");
+      span = scaled;
+    }
+  }
+  if (runStats) {
+    runStats.currentMode = repair ? 'repair' : 'sync';
+    if (!runStats.capModel) runStats.capModel = handsModel;
+  }
+  if (!repair) {
+    log(
+      historyCap
+        ? `手牌窗口每批上限 ${historyCap} 行：按实时GTO 核对的 ${handsModel.samples} 次下载，` +
+          `每行平均 ${handsModel.mean} 手、偏高估计 ${handsModel.handsPerRow} 手，一次 2 万手留 10% 余量`
+        : `手牌窗口每批上限 ${L.sessionCap(true)} 行（按每行 ${L.AUTO.HANDS_PER_SESSION_ESTIMATE} 手估算；` +
+          `实时GTO 核对满 ${HANDS_MODEL_MIN_SAMPLES} 次后会按真实手数放宽，现在 ${handsModel ? handsModel.samples : 0} 次）`,
+      "clicks"
+    );
+  }
 
   const effectiveCap = (fallback) =>
     learnedCap ? Math.min(learnedCap, fallback) : fallback;
@@ -1784,32 +1995,53 @@ async function loopDownload(opts = {}) {
     // 游标永远不动 —— 死循环。
     batchNo++;
     const roundStart = new Date(cursorStart);
+    // 批次不跨手牌窗口的边界：从边界之前开始的，最多截到边界前一天（这一批只下概要），
+    // 下一批从边界开始。跨边界的批次上限只有手牌窗口那么小，还得点两次下载；
+    // 更要命的是边界两侧上限不同，跨度会被来回放大缩小，线上出现过同一段日期无限重做。
+    const boundaryEnd = roundStart < earliestHistory
+      ? new Date(earliestHistory.getTime() - L.MS_PER_DAY) : null;
     const endFor = (sp) => {
       const e = new Date(roundStart.getTime() + (sp - 1) * L.MS_PER_DAY);
       if (e > end) e.setTime(end.getTime());
+      if (boundaryEnd && e > boundaryEnd) e.setTime(boundaryEnd.getTime());
       return e;
     };
     // 本批是否落在手牌详情的 3 个月窗口里，决定用哪个条数上限
-    const capFor = (e) => effectiveCap(L.sessionCap(e >= earliestHistory));
+    const capFor = (e) => effectiveCap(baseCap(e >= earliestHistory));
 
-    // 跨进手牌窗口时上限会从 500 掉到 100（差 5 倍），沿用原跨度必然超限重做。
-    // 必须在定下本批日期范围之前就缩放 —— 之前是先算好范围再缩，
-    // 缩放只作用到下一批，跨边界的这一批照样超限重做。
+    // 进入手牌窗口时上限会变小，沿用原跨度必然超限重做，所以在定下本批日期之前先按比例缩小。
+    // 只往小调：上限变大时往大调交给密度跟踪器 —— 往大调曾和"超限缩小"来回打架，死循环。
     const tentativeCap = capFor(endFor(span));
-    if (lastCap && tentativeCap !== lastCap) {
+    if (lastCap && tentativeCap < lastCap && !skipRescale) {
       const rescaled = L.rescaleSpanForCap(span, lastCap, tentativeCap);
-      if (rescaled !== span) {
+      if (rescaled < span) {
         log(`上限从 ${lastCap} 变成 ${tentativeCap}，跨度先按比例从 ${span} 天调到 ${rescaled} 天`, "loopDownload");
         span = rescaled;
       }
     }
+    skipRescale = false;
 
-    const roundEnd = endFor(span);
+    let roundEnd = endFor(span);
+    // 兜底：同一段日期连续重做太多次，说明跨度计算在打转，强制折半，保证一定往下走
+    const rangeKey = `${L.fmt(roundStart)}~${L.fmt(roundEnd)}`;
+    sameRangeRedos = rangeKey === lastRedoRange ? sameRangeRedos + 1 : 0;
+    if (sameRangeRedos >= MAX_SAME_RANGE_REDOS) {
+      const days = L.diffDays(roundEnd, roundStart) + 1;
+      const halved = Math.max(L.AUTO.MIN_SPAN, Math.floor(days / 2));
+      logWarning(`${rangeKey} 已连续重做 ${sameRangeRedos} 次，跨度计算异常，强制折半到 ${halved} 天`, "loopDownload");
+      span = halved;
+      roundEnd = endFor(span);
+      sameRangeRedos = 0;
+    }
     const startStr = L.fmt(roundStart);
     const endStr = L.fmt(roundEnd);
     const batchDays = L.diffDays(roundEnd, roundStart) + 1;
     const inHistoryWindow = roundEnd >= earliestHistory;
     const cap = capFor(roundEnd);
+    if (runStats) {
+      runStats.currentCap = cap;
+      runStats.currentInHistory = roundEnd >= earliestHistory;
+    }
     // 跨度由密度跟踪器在每批结束时给出（suggestSpan），这里只处理上限突变。
     // 目标是每批尽量装满到上限，让用户少点几次下载 —— 重做只花加载时间，
     // 点击是用户的时间。
@@ -1848,6 +2080,7 @@ async function loopDownload(opts = {}) {
 
     /** 写一条流水账。status 说明这批的结局，note 说明原因。 */
     const record = (status, note) => {
+      statBatch(status, note, batchDays);
       const ledgerStatus = LEDGER_STATUS[status];
       if (ledgerStatus) {
         for (const kind of expectedKinds()) {
@@ -1888,7 +2121,11 @@ async function loopDownload(opts = {}) {
     };
 
     /** 游标不动、原样重来（缩小跨度 / 瞬时空表复查），也要留痕。 */
-    const redo = (status, note) => record(status, note);
+    const redo = (status, note) => {
+      lastRedoRange = `${startStr}~${endStr}`;
+      skipRescale = true;   // 刚按密度定过跨度，下一轮别再按上限比例改它
+      record(status, note);
+    };
 
     /** 中途被用户停止。也要写进流水账，否则"停在哪一批"完全看不出来。 */
     const stopNow = () => {
@@ -2214,7 +2451,7 @@ async function loopDownload(opts = {}) {
           logWarning(`提示里没有数字，把上限压到 ${learnedCap} 条再试`, "limit");
         }
 
-        const capNow = effectiveCap(L.sessionCap(inHistoryWindow));
+        const capNow = effectiveCap(baseCap(inHistoryWindow));
 
         if (span > L.AUTO.MIN_SPAN) {
           // 还能按日期切就先切日期，代价最小
@@ -2356,6 +2593,8 @@ async function loopDownload(opts = {}) {
   }
 
   dumpJournal();
+  // 记下这次量出来的密度，下次同步第一批就用它（补下载只跑零碎几段，不算）
+  if (!repair && density.rate > 0) await saveDensity(pageType, density.rate);
   // 补下载只跑一段，结果交给 runRepair 汇总；运行状态也由它统一收尾
   if (repair) {
     const ok = contiguous && !stopFlag;

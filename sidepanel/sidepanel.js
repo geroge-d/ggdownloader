@@ -283,9 +283,10 @@ function escapeHtml(str) {
 }
 
 copyLogBtn && copyLogBtn.addEventListener('click', async function () {
-  const res = await new Promise((r) => chrome.storage.local.get(['ggpokerStatus', 'ggRtgtoLastVerify'], r));
+  const res = await new Promise((r) => chrome.storage.local.get(['ggpokerStatus', 'ggRtgtoLastVerify', 'ggClickStats'], r));
   const st = (res && res.ggpokerStatus) || {};
   const lastVerify = res && res.ggRtgtoLastVerify;
+  const clickStats = Array.isArray(res && res.ggClickStats) ? res.ggClickStats.slice(-10) : [];
   const entries = st.importantLog || [];
   const header = [
     `GGPoker助手 运行日志`,
@@ -299,6 +300,11 @@ copyLogBtn && copyLogBtn.addEventListener('click', async function () {
     ? entries.map((e) => `${e.t} [${e.ctx || '-'}] ${e.type}: ${e.msg}`).join('\n')
     : '(无)';
   // 下载有没有到手是实时GTO 核对的，出问题时它那边的每一步都要一起发给开发者
+  // 最近几轮的点击统计：分析怎么减少点击用
+  if (clickStats.length) {
+    body += '\n--- 最近 ' + clickStats.length + ' 轮点击统计 ---\n' +
+      clickStats.map((s) => JSON.stringify(s)).join('\n');
+  }
   if (lastVerify) {
     body += '\n--- 最近一次实时GTO核对 ' + (lastVerify.at || '') + ' ---\n' +
       (lastVerify.sent || []).join('\n') + '\n' +
