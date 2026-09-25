@@ -705,13 +705,21 @@ async function learnHandsPerRow(pageType) {
   return { samples: ratios.length, handsPerRow: Math.round(p90 * 10) / 10, mean: Math.round(mean * 10) / 10, cap };
 }
 
+// 同步中途因页面异常中止时的原因：有它就不进核对阶段，状态停在这条提示上
+let loopAbortMessage = null;
+
 async function runAutomation() {
   runStats = newRunStats(currentPageType());
+  loopAbortMessage = null;
   try {
     logSuccess("开始自动化流程", "runAutomation");
     await loopDownload();
     if (stopFlag) {
       logWarning("自动化流程被手动停止", "runAutomation");
+      return;
+    }
+    if (loopAbortMessage) {
+      updateStatus("error", loopAbortMessage);
       return;
     }
     // 同步只保证"点了下载"。下没下到要等实时GTO 核对，缺的自动补，确认齐了才算完成。
@@ -731,6 +739,8 @@ async function runAutomation() {
     logError(e, "runAutomation");
   } finally {
     await finishRunStats();
+    // 中止了：点击统计那行别盖住中止原因
+    if (loopAbortMessage) currentStatus.lastMessage = loopAbortMessage;
     // 要写回存储：侧边栏看存储里的状态，只改内存的话按钮会一直停在"停止 / 暂停"
     currentStatus.isRunning = false;
     currentStatus.isPaused = false;
@@ -2034,6 +2044,11 @@ async function loopDownload(opts = {}) {
   // 游标不前进的重做（瞬时空表复查 / 超限缩小跨度）必须有上限，否则会死循环
   let redoCount = 0;
   const MAX_REDO = 2;
+  // 列表加载超时（网络请求一直没结束）的连续次数。超时的 0 行不能当成"没数据"：
+  // 线上见过 92 天的区间请求卡住 2 分钟、页面显示 0 行，扩展当成没打牌推进了同步记录，
+  // 结果 7 个多月的数据一个没下。
+  let loadTimeouts = 0;
+  const MAX_LOAD_TIMEOUTS = 3;
 
   // GG 真实的"一次最多能选多少场"。
   // 内置常量（概要 500 / 手牌按 2 万手折 100 场）只是估计，线上已证明会超限；
@@ -2473,6 +2488,33 @@ async function loopDownload(opts = {}) {
         advance('失败', '日期筛选未生效'); continue;
       }
       filterRetries = 0;
+
+      // 5.6 网络请求没结束、列表又是空的：是加载失败，不是没数据。
+      //     缩小日期跨度重试（区间太大时 GG 的请求可能卡住）；连续几次都这样就停下，
+      //     绝不推进同步记录。
+      if (settle.viaNetwork && !settle.stable && settle.rows === 0 && D.countRows() === 0) {
+        loadTimeouts++;
+        if (loadTimeouts >= MAX_LOAD_TIMEOUTS) {
+          const message = `GG 列表连续 ${loadTimeouts} 次加载超时（网络请求一直没结束），已停止同步，` +
+            `同步记录停在 ${startStr} 之前，没下的日期一天都没有跳过。请刷新 PokerCraft 页面后再点开始同步。`;
+          logStepFailure(message);
+          contiguous = false;
+          record('中止', '列表连续加载超时');
+          dumpJournal();
+          loopAbortMessage = message;
+          return;
+        }
+        const smaller = Math.max(L.AUTO.MIN_SPAN, Math.floor(span / 2));
+        logWarning(
+          `${startStr} ~ ${endStr} 列表加载超时、显示 0 行 —— 不能当成没数据；` +
+          `第 ${loadTimeouts} 次，跨度从 ${span} 天缩到 ${smaller} 天重试`,
+          "loopDownload"
+        );
+        span = smaller;
+        redo('重做', `列表加载超时，跨度缩到 ${smaller} 天`);
+        continue;   // 不 advance、不 commit
+      }
+      if (settle.stable) loadTimeouts = 0;
 
       let rowCount = settle.rows;
       log(
