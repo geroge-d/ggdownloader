@@ -25,8 +25,6 @@ const loginUser = document.getElementById('login-username');
 const loginPwd = document.getElementById('login-password');
 const loginError = document.getElementById('login-error');
 const mainPanel = document.getElementById('main-panel');
-const userInfoDiv = document.getElementById('user-info');
-const userNameSpan = document.getElementById('user-name');
 // 退出按钮在顶栏右侧，和账号区分开，要单独控制显示
 const rememberPwd = document.getElementById('remember-pwd');
 const logoutBtn = document.getElementById('logout-btn');
@@ -1080,7 +1078,6 @@ function showAuthLoading(text) {
   authLoadingText.textContent = text || t('auth_checking');
   loginForm.style.display = 'none';
   mainPanel.style.display = 'none';
-  userInfoDiv.style.display = 'none';
   logoutBtn.style.display = 'none';
 }
 
@@ -1088,7 +1085,6 @@ function showLoginForm(errorMsg) {
   authLoading.style.display = 'none';
   loginForm.style.display = 'block';
   mainPanel.style.display = 'none';
-  userInfoDiv.style.display = 'none';
   logoutBtn.style.display = 'none';
   loginError.textContent = errorMsg || '';
   loginUser.value = '';
@@ -1107,11 +1103,7 @@ function showMainPanel(userInfo) {
   authLoading.style.display = 'none';
   loginForm.style.display = 'none';
   mainPanel.style.display = 'flex';
-  userInfoDiv.style.display = 'flex';
   logoutBtn.style.display = 'inline-block';
-  // 顶栏只放账号本身，不带前缀、不显示到期时间
-  userNameSpan.textContent = userInfo.userName || '';
-  userNameSpan.title = userInfo.userName || '';
   // 记录到全局，便于切换语言时刷新
   window.userInfoForI18n = userInfo;
   const errDiv = document.getElementById('logout-error');
@@ -1232,7 +1224,7 @@ function showLogoutError(msg) {
     errDiv.style.color = '#ef4444';
     errDiv.style.fontSize = '14px';
     errDiv.style.marginTop = '6px';
-    document.getElementById('user-info').appendChild(errDiv);
+    document.querySelector('.topbar').after(errDiv);
   }
   errDiv.textContent = msg;
   errDiv.style.display = '';
@@ -1269,10 +1261,6 @@ function updateI18nText() {
   // 按钮文字跟运行状态走：data-i18n 只写了静态文案，运行中切语言会被覆盖成"开始同步"
   startStopBtn.textContent = isRunning ? t('stop') : t('sync_now');
   pauseResumeBtn.textContent = isPaused ? t('resume') : t('pause');
-  // 新增：刷新用户信息区的国际化
-  if (window.userInfoForI18n) {
-    userNameSpan.textContent = window.userInfoForI18n.userName || '';
-  }
 }
 
 // 语言选择要记住：否则每次打开侧边栏都会按浏览器语言重置，用户得反复切换
