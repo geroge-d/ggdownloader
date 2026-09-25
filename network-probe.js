@@ -31,12 +31,16 @@
   let inflight = 0;
   let lastDoneAt = 0;
   let totalSeen = 0;
+  // 失败的请求数（网络错误、被中止、HTTP 4xx/5xx）：列表请求失败时页面同样显示 0 行，
+  // 不能当成"没数据"。只看状态码，不读内容。
+  let totalFailed = 0;
 
   function publish() {
     try {
       root.dataset.ggInflight = String(inflight);
       root.dataset.ggLastDone = String(lastDoneAt);
       root.dataset.ggNetSeen = String(totalSeen);
+      root.dataset.ggNetFailed = String(totalFailed);
     } catch (e) {
       /* 写 DOM 失败也不能影响页面 */
     }
@@ -48,9 +52,10 @@
     publish();
   }
 
-  function done() {
+  function done(failed) {
     inflight = Math.max(0, inflight - 1);
     lastDoneAt = Date.now();
+    if (failed) totalFailed++;
     publish();
   }
 
@@ -75,11 +80,13 @@
       if (!counted) return p;
       return p.then(
         (res) => {
-          done();
+          let failed = false;
+          try { failed = !!res && res.ok === false; } catch (e) { /* 读不到状态就当成功 */ }
+          done(failed);
           return res;
         },
         (err) => {
-          done();
+          done(true);
           throw err;
         }
       );
@@ -95,10 +102,13 @@
       try {
         start();
         counted = true;
+        const xhr = this;
         const finish = () => {
           if (!counted) return;
           counted = false;
-          done();
+          let failed = false;
+          try { failed = xhr.status === 0 || xhr.status >= 400; } catch (e) { /* 同上 */ }
+          done(failed);
         };
         this.addEventListener("loadend", finish);
       } catch (e) {

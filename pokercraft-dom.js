@@ -653,13 +653,14 @@
   function netState() {
     const ds = document.documentElement.dataset;
     if (ds.ggInflight === undefined) {
-      return { available: false, inflight: 0, lastDoneAt: 0, seen: 0 };
+      return { available: false, inflight: 0, lastDoneAt: 0, seen: 0, failed: 0 };
     }
     return {
       available: true,
       inflight: Number(ds.ggInflight) || 0,
       lastDoneAt: Number(ds.ggLastDone) || 0,
       seen: Number(ds.ggNetSeen) || 0,
+      failed: Number(ds.ggNetFailed) || 0,
     };
   }
 
