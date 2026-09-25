@@ -610,9 +610,11 @@ async function finishRunStats() {
   // 理论最少：概要一次最多 500 条；手牌一次最多 2 万手（按学到的每行手数折算）
   const minSummary = summary ? Math.ceil(summary.items / L.SUMMARY_MAX_PER_DOWNLOAD) : 0;
   const handsPerRow = s.capModel && s.capModel.handsPerRow;
-  const minHistory = history
-    ? Math.ceil(history.items * (handsPerRow || L.AUTO.HANDS_PER_SESSION_ESTIMATE) / L.HISTORY_MAX_HANDS_PER_DOWNLOAD)
-    : 0;
+  // 手牌按钮上的数现在读得出手数（"8,411"）：平均一次上百就当手数，直接按 2 万手算；
+  // 否则还是行数，按每行手数折算
+  const minHistory = !history ? 0 : history.avgPerClick > 500
+    ? Math.ceil(history.items / L.HISTORY_MAX_HANDS_PER_DOWNLOAD)
+    : Math.ceil(history.items * (handsPerRow || L.AUTO.HANDS_PER_SESSION_ESTIMATE) / L.HISTORY_MAX_HANDS_PER_DOWNLOAD);
   const redoTotal = sum(Object.values(s.redos));
   const stat = {
     at: GG_LEDGER ? GG_LEDGER.localIso(s.startedAt) : new Date(s.startedAt).toISOString(),
@@ -690,7 +692,7 @@ async function learnHandsPerRow(pageType) {
   if (!GG_LEDGER) return null;
   const list = await GG_LEDGER.getAll();
   const ratios = list
-    .filter(e => e.pageType === pageType && e.kind === 'history' && !e.chunk &&
+    .filter(e => e.pageType === pageType && e.kind === 'history' && (!e.chunk || e.rowsExact) &&
       e.rows > 0 && e.verify && (e.verify.status === 'ok' || e.verify.status === 'count_diff') &&
       e.verify.metrics && e.verify.metrics.hands > 0)
     .map(e => e.verify.metrics.hands / e.rows)
@@ -1650,68 +1652,117 @@ async function waitForTableSettledByTime(fpBefore, timeout = 60000) {
 async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, rec, want = {}) {
   const wantSummary = want.wantSummary !== false;
   const wantHistory = want.wantHistory !== false;
+  const doSummary = wantSummary && currentPageConfig().hasSummary;
+  const doHistory = inHistoryWindow && wantHistory;
+  // 一趟最多勾多少行（概要按钮的上限，默认 500）；手牌窗口里还要看手数
+  const maxRows = Math.max(1, want.maxRows || chunkSize);
+  const handLimit = L.HISTORY_MAX_HANDS_PER_DOWNLOAD;
   const total = D.findRowCheckboxes().length;
   if (!total) {
     logWarning("按行分批时找不到行复选框，放弃本批", "chunk");
     return false;
   }
-  const chunks = Math.ceil(total / chunkSize);
-  log(`${startStr} 共 ${total} 行，按每批 ${chunkSize} 行分 ${chunks} 趟下载`, "chunk");
+  // 剩下的行平均分：507 行、上限 500 就分 254 + 253，而不是 500 + 7
+  const balanced = (rem, cap) => Math.ceil(rem / Math.ceil(rem / Math.max(1, cap)));
+  log(`${startStr} ~ ${endStr} 共 ${total} 行，超过单次下载上限，分几趟下：` +
+    `勾一部分 → 点下载 → 再勾下一部分` +
+    (doHistory ? `（每趟概要不超过 ${maxRows} 条、手牌不超过 ${handLimit} 手）` : `（每趟不超过 ${maxRows} 条）`), "chunk");
 
-  for (let i = 0; i < chunks; i++) {
-    if (stopFlag) return false;
-    await waitIfPaused();
-
-    const from = i * chunkSize;
-    const to = Math.min(total, from + chunkSize);
-
+  // 勾第 from..to-1 行，等按钮上的数字稳定下来再读
+  const pick = async (from, to) => {
     D.clearSelection();
-    await wait(randomBetween(400, 800));
-
-    // selectFirstRows 只能从头选，所以这里靠逐行点选第 from..to 区间
+    await wait(randomBetween(300, 600));
     const boxes = D.findRowCheckboxes();
     if (boxes.length !== total) {
       logWarning(`行数从 ${total} 变成 ${boxes.length}，表格被重渲染了，放弃分批`, "chunk");
-      return false;
+      return { ok: false };
     }
-    let picked = 0;
     for (let r = from; r < to; r++) {
       const b = boxes[r];
-      if (b && b.tagName === "INPUT" && !b.checked) { b.click(); picked++; }
+      if (b && b.tagName === "INPUT" && !b.checked) b.click();
     }
-    await wait(randomBetween(800, 1400));
+    let last = '', stable = 0, s = 0, h = 0;
+    for (let i = 0; i < 12 && stable < 2; i++) {
+      await wait(i === 0 ? randomBetween(600, 900) : 300);
+      s = D.downloadCount(D.findSummaryButton());
+      h = D.downloadCount(D.findHistoryButton());
+      const sig = `${s}|${h}`;
+      stable = sig === last && (s > 0 || h > 0) ? stable + 1 : 0;
+      last = sig;
+    }
+    // 勾多了 GG 会弹"下载限制"遮罩，先关掉再说
+    const limit = D.findLimitError();
+    if (limit || D.findLimitDialog()) await dismissLimitDialog("分趟勾选后");
+    return { ok: true, sCount: s, hCount: h, limit: limit || null };
+  };
 
-    const sCount = D.downloadCount(D.findSummaryButton());
-    const hCount = D.downloadCount(D.findHistoryButton());
-    log(`第 ${i + 1}/${chunks} 趟：勾选 ${picked} 行，概要 ${sCount} / 手牌 ${hCount}`, "chunk");
+  let from = 0;
+  let round = 0;
+  let size = doHistory ? Math.min(maxRows, chunkSize) : balanced(total, maxRows);
+  while (from < total) {
+    if (stopFlag) return false;
+    await waitIfPaused();
+    round++;
+    let to = Math.min(total, from + Math.max(1, size));
+    let sel = await pick(from, to);
+    if (!sel.ok) return false;
 
-    if (sCount === 0 && hCount === 0) {
-      logWarning(`第 ${i + 1} 趟勾选后条数仍为 0，放弃分批`, "chunk");
+    // 手牌按钮上是手数：超了按比例少勾，远没装满且后面还有行就按比例多勾（最多调 3 次）
+    for (let t = 0; t < 3; t++) {
+      const rows = to - from;
+      let next = rows;
+      const handsLike = doHistory && sel.hCount > rows;   // 按钮数比行数还大，才当它是手数
+      if (sel.limit) {
+        next = handsLike ? Math.floor(rows * handLimit * L.AUTO.HANDS_FILL / sel.hCount) : Math.floor(rows / 2);
+      } else if (handsLike && sel.hCount > handLimit * L.AUTO.HANDS_OVER) {
+        next = Math.floor(rows * handLimit * L.AUTO.HANDS_FILL / sel.hCount);
+      } else if (handsLike && sel.hCount < handLimit * 0.8 && to < total && rows < maxRows) {
+        next = Math.min(maxRows, total - from, Math.floor(rows * handLimit * L.AUTO.HANDS_FILL / sel.hCount));
+      }
+      next = Math.max(1, Math.min(maxRows, next));
+      if (next === rows) break;
+      log(`第 ${round} 趟：${rows} 行是 ${sel.hCount} 手${sel.limit ? '（GG 提示超限）' : ''}，改勾 ${next} 行`, "chunk");
+      to = from + next;
+      sel = await pick(from, to);
+      if (!sel.ok) return false;
+    }
+    if (sel.limit) {
+      logWarning(`第 ${round} 趟只勾 ${to - from} 行仍然超限：${sel.limit.text}，放弃分批（下次会用更小的上限）`, "chunk");
+      return false;
+    }
+    if (sel.sCount === 0 && sel.hCount === 0) {
+      logWarning(`第 ${round} 趟勾选后条数仍为 0，放弃分批`, "chunk");
       return false;
     }
 
-    // 勾完还超限说明 chunkSize 还是太大
-    const stillOver = D.findLimitError();
-    if (stillOver) {
-      logWarning(`第 ${i + 1} 趟仍然超限：${stillOver.text}，放弃分批（下次会用更小的上限）`, "chunk");
-      return false;
-    }
-
-    const label = `${startStr}（第 ${i + 1}/${chunks} 趟，第 ${from + 1}-${to} 行）`;
-    // 同一天拆成几趟，记录里标上第几趟、哪几行，核对时才知道这一天应该有几个文件
-    const chunkRec = rec && Object.assign({}, rec, { chunk: `${i + 1}/${chunks}`, rowRange: `${from + 1}-${to}` });
-    if (wantSummary && currentPageConfig().hasSummary) {
-      const ok = await promptDownload('summary', sCount, label, endStr, chunkRec);
+    const rows = to - from;
+    log(`第 ${round} 趟：第 ${from + 1}-${to} 行（共 ${total} 行），概要 ${sel.sCount} / 手牌 ${sel.hCount}`, "chunk");
+    const label = `${startStr}（第 ${round} 趟，第 ${from + 1}-${to} 行）`;
+    // 同一段日期拆成几趟：记录里标上第几趟、哪几行、这一趟的行数（学每行手数时要用）
+    const chunkRec = rec && Object.assign({}, rec, {
+      chunk: String(round), rowRange: `${from + 1}-${to}`, rows, rowsExact: true,
+    });
+    if (doSummary) {
+      const ok = await promptDownload('summary', sel.sCount, label, endStr, chunkRec);
       if (!ok) return false;
     }
     if (stopFlag) return false;
-    if (inHistoryWindow && wantHistory) {
-      const ok = await promptDownload('history', hCount, label, endStr, chunkRec);
+    if (doHistory) {
+      const ok = await promptDownload('history', sel.hCount, label, endStr, chunkRec);
       if (!ok) return false;
     }
-  }
 
-  logSuccess(`${startStr} 按行分批下载完成（${chunks} 趟）`, "chunk");
+    from = to;
+    // 下一趟：手牌按这一趟量到的每行手数定，否则把剩下的平均分
+    const rem = total - from;
+    if (rem > 0) {
+      const perRow = doHistory && sel.hCount > rows ? sel.hCount / rows : 0;
+      const byHands = perRow ? Math.floor(handLimit * L.AUTO.HANDS_FILL / perRow) : maxRows;
+      size = balanced(rem, Math.min(maxRows, byHands));
+    }
+  }
+  D.clearSelection();
+  logSuccess(`${startStr} ~ ${endStr} 分 ${round} 趟下载完成`, "chunk");
   return true;
 }
 
@@ -2003,7 +2054,7 @@ async function loopDownload(opts = {}) {
   if (savedDensity) {
     // effectiveCap 在后面才定义，这里直接套一下学到的选中上限
     const base = baseCap(start >= earliestHistory);
-    const capStart = learnedCap ? Math.min(learnedCap, base) : base;
+    const capStart = Math.max(learnedCap ? Math.min(learnedCap, base) : base, L.AUTO.BATCH_MAX_ROWS);
     const fit = Math.max(L.AUTO.MIN_SPAN, Math.min(L.AUTO.MAX_SPAN,
       Math.floor(capStart * L.AUTO.DENSITY_SAFETY / savedDensity.rate)));
     if (fit > span) {
@@ -2036,6 +2087,11 @@ async function loopDownload(opts = {}) {
 
   const effectiveCap = (fallback) =>
     learnedCap ? Math.min(learnedCap, fallback) : fallback;
+  // 批次大小瞄准的行数：超过单次上限的批次按行分趟下，所以瞄准 BATCH_MAX_ROWS（的 95%），
+  // 不再瞄准单次上限（那样每批都装不满，稍一超就要缩日期重做）
+  const sizeCapFor = (c) => Math.max(c, L.AUTO.BATCH_MAX_ROWS);
+  // 分趟时一趟最多勾多少行：概要按钮的上限（学到的更小就用学到的）
+  const roundRows = () => effectiveCap(L.sessionCap(false));
 
   const rememberCap = async (value) => {
     if (!value || value < 1) return;
@@ -2133,7 +2189,7 @@ async function loopDownload(opts = {}) {
 
     // 进入手牌窗口时上限会变小，沿用原跨度必然超限重做，所以在定下本批日期之前先按比例缩小。
     // 只往小调：上限变大时往大调交给密度跟踪器 —— 往大调曾和"超限缩小"来回打架，死循环。
-    const tentativeCap = capFor(endFor(span));
+    const tentativeCap = sizeCapFor(capFor(endFor(span)));
     if (lastCap && tentativeCap < lastCap && !skipRescale) {
       const rescaled = L.rescaleSpanForCap(span, lastCap, tentativeCap);
       if (rescaled < span) {
@@ -2167,7 +2223,8 @@ async function loopDownload(opts = {}) {
     // 跨度由密度跟踪器在每批结束时给出（suggestSpan），这里只处理上限突变。
     // 目标是每批尽量装满到上限，让用户少点几次下载 —— 重做只花加载时间，
     // 点击是用户的时间。
-    lastCap = cap;
+    lastCap = sizeCapFor(cap);
+    const sizeCap = sizeCapFor(cap);
 
     // 循环条件是游标位置，所以任何 continue 之前都必须先推进游标，
     // 否则会死循环卡在同一段日期上（缩小跨度重试是唯一例外）。
@@ -2471,7 +2528,7 @@ async function loopDownload(opts = {}) {
           density.observe(0, batchDays);
           // 空批次多半处在"这段时间没打牌"的死区，直接翻倍快速跳过。
           // 已知密度留着不清除 —— 之前一清零就会在数据重新出现时又撞一次上限。
-          const next = density.suggestSpan(cap, span, true);
+          const next = density.suggestSpan(sizeCap, span, true);
           if (next > span) {
             log(
               `空批次（已连空 ${density.emptyStreak} 批），跨度 ${span} 天 -> ${next} 天`,
@@ -2486,6 +2543,37 @@ async function loopDownload(opts = {}) {
       }
       batchRows = rowCount;
 
+      // 按已知密度重新定下一批的跨度（可大可小），瞄准每批约 BATCH_MAX_ROWS 的 95%
+      const resizeAfterBatch = () => {
+        const suggested = density.suggestSpan(sizeCap, span, false);
+        if (suggested !== span) {
+          log(
+            `按密度（约 ${density.rate.toFixed(1)} 行/天）把跨度从 ${span} 天调到 ${suggested} 天` +
+            `（目标每批约 ${Math.round(sizeCap * L.AUTO.DENSITY_SAFETY)} 行）`,
+            "loopDownload"
+          );
+          span = suggested;
+        }
+      };
+      // 本批超过单次下载上限：按行分几趟下完。返回 true 表示整个同步要结束（停止或连续失败）
+      const chunkBatch = async (capHint) => {
+        const ok = await downloadInChunks(capHint, startStr, endStr, inHistoryWindow, batchRec(),
+          { wantSummary, wantHistory, maxRows: roundRows() });
+        if (!ok) {
+          if (stopFlag) { stopNow(); return true; }
+          contiguous = false;
+          if (await bailOnFailure()) { record('中止', '分趟下载异常'); dumpJournal(); return true; }
+          advance('未下载', `分趟下载未完成（上限 ${capHint}）`);
+          return false;
+        }
+        failStreak = 0;
+        density.observe(rowCount, batchDays);
+        await commit(true);
+        advance('完成', `${rowCount} 行超过单次上限，已分趟下载`);
+        resizeAfterBatch();
+        return false;
+      };
+
       if (stopFlag) { stopNow(); return; }
       await waitIfPaused();
 
@@ -2495,36 +2583,23 @@ async function loopDownload(opts = {}) {
       // 用户点不到下载按钮，插件也点不到任何元素，整个流程就卡死了。
       // 行数在选之前就知道，所以超限的批次压根不要去全选。
       if (rowCount > cap) {
-        density.observe(rowCount, batchDays);
         const perDay = rowCount / batchDays;
 
-        if (span > L.AUTO.MIN_SPAN) {
-          // 按实测密度一次算准，别对半砍：每砍一次都要重设日期+重新加载。
-          const smaller = L.spanForDensity(rowCount, batchDays, cap, span);
+        // 列表太长才缩日期重做；否则不重做，按行分几趟下完（省一次重新加载，每趟都装满）
+        if (rowCount > L.AUTO.BATCH_MAX_ROWS && span > L.AUTO.MIN_SPAN) {
+          density.observe(rowCount, batchDays);
+          const smaller = L.spanForDensity(rowCount, batchDays, sizeCap, span);
           logWarning(
-            `本批 ${rowCount} 行 / ${batchDays} 天（约 ${perDay.toFixed(1)} 行/天）超过上限 ${cap}；` +
+            `本批 ${rowCount} 行 / ${batchDays} 天（约 ${perDay.toFixed(1)} 行/天），列表太长（超过 ${L.AUTO.BATCH_MAX_ROWS} 行）；` +
             `按密度把跨度从 ${span} 天调到 ${smaller} 天，重做本批`,
             "loopDownload"
           );
           span = smaller;
-          redo('重做', `${rowCount} 行超上限 ${cap}，按密度调到 ${smaller} 天`);
+          redo('重做', `${rowCount} 行超过每批 ${L.AUTO.BATCH_MAX_ROWS} 行，按密度调到 ${smaller} 天`);
           continue;
         }
-        // 已经是单日了，日期切不动，只能按行分批
-        logWarning(
-          `${startStr} 单日就有 ${rowCount} 行，超过上限 ${cap}，改为按行分批下载`,
-          "loopDownload"
-        );
-        const ok = await downloadInChunks(cap, startStr, endStr, inHistoryWindow, batchRec(), { wantSummary, wantHistory });
-        if (!ok) {
-          if (stopFlag) { stopNow(); return; }
-          contiguous = false;
-          if (await bailOnFailure()) { record('中止', '分批下载异常'); dumpJournal(); return; }
-          advance('未下载', `单日超限且分批下载未完成（上限 ${cap}）`); continue;
-        }
-        failStreak = 0;
-        await commit(true);
-        advance('完成', `单日 ${rowCount} 行超限，已按每批 ${cap} 条分多趟下载`);
+        log(`本批 ${rowCount} 行超过单次下载上限 ${cap}，不缩日期重做，直接分趟下载`, "loopDownload");
+        if (await chunkBatch(cap)) return;
         continue;
       }
 
@@ -2576,65 +2651,27 @@ async function loopDownload(opts = {}) {
         }
 
         const capNow = effectiveCap(baseCap(inHistoryWindow));
-
-        if (span > L.AUTO.MIN_SPAN) {
-          // 还能按日期切就先切日期，代价最小
-          const smaller = Math.max(L.AUTO.MIN_SPAN, Math.floor(span / 2));
-          logWarning(`跨度 ${span} 天 -> ${smaller} 天，重做本批`, "limit");
-          span = smaller;
-          D.clearSelection();
-          redo('重做', `超限（${limitErr.text}），跨度缩到 ${smaller} 天`);
-          continue;
-        }
-
-        // 已经是单日了，日期切不动 —— 改成只选前 capNow 行，分几趟下
-        logWarning(
-          `${startStr} 单日就有 ${observed} 条，超过上限 ${capNow}，改为按行分批下载`,
-          "limit"
-        );
-        const ok = await downloadInChunks(capNow, startStr, endStr, inHistoryWindow, batchRec(), { wantSummary, wantHistory });
-        if (!ok) {
-          if (stopFlag) { stopNow(); return; }
-          contiguous = false;
-          if (await bailOnFailure()) { record('中止', '分批下载异常'); dumpJournal(); return; }
-          advance('未下载', `单日超限且分批下载未完成（上限 ${capNow}）`); continue;
-        }
-        failStreak = 0;
-        await commit(true);
-        advance('完成', `单日超限，已按每批 ${capNow} 条分多趟下载`);
+        // 不缩日期重做：按行分几趟下（手牌按按钮上的手数装）
+        D.clearSelection();
+        logWarning(`${startStr} ~ ${endStr} 全选后超限，改为分趟下载（上限 ${capNow}）`, "limit");
+        if (await chunkBatch(capNow)) return;
         continue;
       }
 
       // 兜底：行数没超但"已选条数"顶到上限（按理不该发生，这里防一手）
       const decision = L.nextSpan(span, observed, cap);
       if (decision.action === "shrink") {
-        const smaller = L.spanForDensity(observed, batchDays, cap, span);
-        logWarning(
-          `本批已选 ${observed} 条达上限 ${cap}，按密度把跨度从 ${span} 天调到 ${smaller} 天，重做本批`,
-          "loopDownload"
-        );
-        density.observe(observed, batchDays);
-        span = smaller;
+        // 已选条数顶到上限：不缩日期重做，改为分趟下
         D.clearSelection();
-        redo('重做', `已选 ${observed} 条达上限 ${cap}，跨度调到 ${smaller} 天`);
-        continue;   // 故意不 advance：同一段日期用更小的跨度重来
+        logWarning(`本批已选 ${observed} 条达上限 ${cap}，改为分趟下载`, "loopDownload");
+        if (await chunkBatch(cap)) return;
+        continue;
       }
       if (decision.action === "capped") {
-        // 单日就超过我们的估计值。先按行分批下，别硬着头皮全选。
-        logWarning(
-          `${startStr} 单日就有 ${observed} 条，超过上限 ${cap}，改为按行分批下载`,
-          "loopDownload"
-        );
-        const ok = await downloadInChunks(cap, startStr, endStr, inHistoryWindow, batchRec(), { wantSummary, wantHistory });
-        if (!ok) {
-          if (stopFlag) { stopNow(); return; }
-          contiguous = false;
-          if (await bailOnFailure()) { record('中止', '分批下载异常'); dumpJournal(); return; }
-          advance('未下载', `单日超限且分批下载未完成（上限 ${cap}）`); continue;
-        }
-        failStreak = 0;
-        await commit(true);
-        advance('完成', `单日超限，已按每批 ${cap} 条分多趟下载`);
+        // 单日就超过我们的估计值。按行分趟下，别硬着头皮全选。
+        D.clearSelection();
+        logWarning(`${startStr} 单日就有 ${observed} 条，超过上限 ${cap}，改为分趟下载`, "loopDownload");
+        if (await chunkBatch(cap)) return;
         continue;
       }
 
@@ -2694,15 +2731,7 @@ async function loopDownload(opts = {}) {
       //
       // 之前的规则是"条数低于上限 35% 才翻倍"，太保守：一批 200~499 行时
       // 明明还能再大却不动，白白多跑好几批、让用户多点好几次下载。
-      const suggested = density.suggestSpan(cap, span, false);
-      if (suggested !== span) {
-        log(
-          `按密度（约 ${density.rate.toFixed(1)} 行/天）把跨度从 ${span} 天调到 ${suggested} 天` +
-          `（目标每批约 ${Math.round(cap * L.AUTO.DENSITY_SAFETY)} 条）`,
-          "loopDownload"
-        );
-        span = suggested;
-      }
+      resizeAfterBatch();
 
       currentStatus.startDate = startStr;
       currentStatus.endDate = endStr;
