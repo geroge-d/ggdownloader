@@ -2181,6 +2181,10 @@ async function loopDownload(opts = {}) {
   // 方向很重要：GG 的窗口是滑动的，最早那几天随时会过期，先抓快过期的；
   // 而且中途断了水位线也只停在"已完成的最后一天"，下次接着往后补即可。
   let cursorStart = new Date(start);
+  // 按加载速度定的跨度上限：第一批 FIRST_SPAN_MAX，之后看每批列表加载用了多久
+  let spanCeiling = L.AUTO.FIRST_SPAN_MAX;
+  // 加载慢过（或超时）的最短跨度：之后放大不再靠近它，免得快、慢来回反复
+  let slowSpan = Infinity;
 
   while (cursorStart <= end) {
     // 本批的日期边界和推进函数放在 try 外面。
@@ -2188,6 +2192,10 @@ async function loopDownload(opts = {}) {
     // 游标永远不动 —— 死循环。
     batchNo++;
     const roundStart = new Date(cursorStart);
+    if (span > spanCeiling) {
+      log(`跨度 ${span} 天超过按加载速度定的上限，这批先用 ${spanCeiling} 天`, "loopDownload");
+      span = spanCeiling;
+    }
     // 批次不跨手牌窗口的边界：从边界之前开始的，最多截到边界前一天（这一批只下概要），
     // 下一批从边界开始。跨边界的批次上限只有手牌窗口那么小，还得点两次下载；
     // 更要命的是边界两侧上限不同，跨度会被来回放大缩小，线上出现过同一段日期无限重做。
@@ -2438,6 +2446,7 @@ async function loopDownload(opts = {}) {
       const fpBefore = D.tableFingerprint();
       const netBefore = D.netState();
       log(`找到显示按钮 ${describeEl(showButton)}，准备点击...`, "loopDownload");
+      const showClickedAt = Date.now();
       await simulateHumanClick(showButton);
 
       // 5. 等列表真正稳定下来。
@@ -2451,6 +2460,26 @@ async function loopDownload(opts = {}) {
       // 才认为这一批的数据真的加载完了。
       log("等待数据加载...", "loopDownload");
       const settle = await waitForTableSettled(fpBefore, netBefore);
+      // 按这次加载用了多久调整下一批的跨度上限
+      {
+        const loadMs = Date.now() - showClickedAt;
+        const secs = Math.round(loadMs / 1000);
+        const before = spanCeiling;
+        if (!settle.stable || loadMs > L.AUTO.LOAD_SLOW_MS) {
+          slowSpan = Math.min(slowSpan, batchDays);
+          spanCeiling = Math.max(L.AUTO.MIN_SPAN, Math.floor(batchDays / 2));
+        } else if (loadMs < L.AUTO.LOAD_FAST_MS) {
+          spanCeiling = Math.max(L.AUTO.MIN_SPAN, Math.min(L.AUTO.MAX_SPAN,
+            Math.max(spanCeiling, batchDays * 2), Math.floor(slowSpan * 0.6)));
+        } else {
+          spanCeiling = Math.max(L.AUTO.MIN_SPAN, Math.min(spanCeiling, batchDays));
+        }
+        (spanCeiling < before ? logWarning : log)(
+          `列表加载用了 ${secs} 秒（${batchDays} 天）` +
+          (spanCeiling !== before ? `，之后每批最多 ${spanCeiling} 天` : ''),
+          "loopDownload"
+        );
+      }
       log(
         `列表已稳定：${settle.rows} 行（${settle.changed ? '内容已更新' : '与上一批相同'}` +
         `${settle.stable ? '' : '，等待超时'}）`,
