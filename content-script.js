@@ -2100,12 +2100,20 @@ async function loopDownload(opts = {}) {
   // 结果 7 个多月的数据一个没下。
   let loadTimeouts = 0;
   const MAX_LOAD_TIMEOUTS = 3;
-  // 可疑的空结果（期间有请求失败，或加载很慢才空）：只重查前一半日期来确认。
+  // 可疑的空结果（期间有请求失败，或超过 2 分钟才空）：只重查前一半日期来确认。
   // 确认那一遍空且没失败就接受（哪怕也慢——GG 慢的时候小区间也要一两分钟），
   // 只推进这一半；出现了数据就说明刚才是失败。不计入超时中止：真没打牌的分类
   // （现金桌、奥马哈常是整段空的）不能因为 GG 慢就每次都中止。
   let confirmingEmpty = false;
-  const EMPTY_TRUST_MS = 60000;
+  let confirmFromDays = 0;       // 触发重查的那一批有几天
+  // 重查确认过"慢但确实空"的最长跨度：不超过它的慢速空结果不再重查
+  // （GG 慢的时候整段没打牌的分类每批都又慢又空，每次都重查会把跨度一路缩到 1 天）。
+  // 更长的跨度仍要先确认一次；重查一旦出现数据就作废。
+  let trustedEmptySpan = 0;
+  // 超过 2 分钟才出来的空结果才算可疑：GG 慢的时候 1～2 分钟很常见（线上 2 天的区间 107 秒），
+  // 那样的空结果照常接受，否则整段没打牌的分类每批都要多加载一次；2 分钟以上在以前就算超时了，
+  // 线上漏掉 2～9 月数据的正是这一类
+  const EMPTY_TRUST_MS = 120000;
 
   // GG 真实的"一次最多能选多少场"。
   // 内置常量（概要 500 / 手牌按 2 万手折 100 场）只是估计，线上已证明会超限；
@@ -2631,7 +2639,8 @@ async function loopDownload(opts = {}) {
           redo('重做', '复查时页面仍在加载');
           continue;   // 不 advance、不 commit，原样重来
         } else if (settle.viaNetwork && (batchDays > 1 || !confirmingEmpty) &&
-                   (settle.failed || (!confirmingEmpty && Date.now() - showClickedAt > EMPTY_TRUST_MS))) {
+                   (settle.failed || (!confirmingEmpty && batchDays > trustedEmptySpan &&
+                                      Date.now() - showClickedAt > EMPTY_TRUST_MS))) {
           // 空结果可疑：请求失败了，或者等了很久才空。只重查前一半，确认了再推进
           const half = Math.max(L.AUTO.MIN_SPAN, Math.floor(batchDays / 2));
           logWarning(
@@ -2640,14 +2649,22 @@ async function loopDownload(opts = {}) {
             "loopDownload"
           );
           confirmingEmpty = true;
+          confirmFromDays = batchDays;
           span = half;
-          // 记住这个跨度出过问题：之后放大不超过它的 60%，免得 15 ↔ 30 天来回失败
-          slowSpan = Math.min(slowSpan, batchDays);
-          spanCeiling = Math.min(spanCeiling, half);
+          // 请求失败是实打实的信号：记住这个跨度出过问题，之后放大不超过它的 60%
+          //（只是慢不算——要等重查结果才知道）
+          if (settle.failed) {
+            slowSpan = Math.min(slowSpan, batchDays);
+            spanCeiling = Math.min(spanCeiling, half);
+          }
           redo('重做', `空结果可疑，重查前 ${half} 天`);
           continue;   // 不 advance、不 commit
         } else {
-          if (confirmingEmpty) log(`${startStr} ~ ${endStr} 重查确认没有数据`, "loopDownload");
+          if (confirmingEmpty) {
+            // 重查也空、请求也没失败：GG 只是慢。这么长的跨度，之后慢速空结果就不再重查
+            if (!settle.failed) trustedEmptySpan = Math.max(trustedEmptySpan, confirmFromDays);
+            log(`${startStr} ~ ${endStr} 重查确认没有数据（GG 只是慢；不超过 ${trustedEmptySpan} 天的慢速空结果之后直接接受）`, "loopDownload");
+          }
           confirmingEmpty = false;
           // 连续空 8 秒 + 复查仍空：这几天确实没打牌
           log(
@@ -2684,6 +2701,10 @@ async function loopDownload(opts = {}) {
       if (confirmingEmpty) {
         logWarning(`重查出现 ${rowCount} 行：刚才的空结果其实是加载失败，幸好没有跳过`, "loopDownload");
         confirmingEmpty = false;
+        // 慢速空结果会骗人：作废信任，并记住那个跨度出过问题
+        trustedEmptySpan = 0;
+        slowSpan = Math.min(slowSpan, confirmFromDays);
+        spanCeiling = Math.min(spanCeiling, Math.max(L.AUTO.MIN_SPAN, Math.floor(confirmFromDays * 0.6)));
       }
 
       // 按已知密度重新定下一批的跨度（可大可小），瞄准每批约 BATCH_TARGET_ROWS 的 95%
