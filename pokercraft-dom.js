@@ -522,13 +522,25 @@
 
   /** 取消所有行的勾选（含表头全选）。 */
   function clearSelection() {
+    const rows = findRowCheckboxes().filter((b) => b.tagName === "INPUT");
     const header = findSelectAllCheckbox();
-    if (header && header.tagName === "INPUT" && header.checked) {
-      header.click();   // 取消全选通常会连带清空所有行
+    // 只在每一行都勾着时才点表头取消全选：只勾了一部分时点表头会变成"全选"，
+    // 勾上几百行超过 500 就弹"下载限制"遮罩
+    if (header && header.tagName === "INPUT" && header.checked && rows.length && rows.every((b) => b.checked)) {
+      header.click();
     }
     findRowCheckboxes().forEach((b) => {
       if (b.tagName === "INPUT" && b.checked) b.click();
     });
+  }
+
+  /** 表头全选框的状态（排查"下载限制"弹窗时写进日志） */
+  function selectAllState() {
+    const h = findSelectAllCheckbox();
+    if (!h) return "无表头";
+    const input = h.tagName === "INPUT" ? h : h.querySelector && h.querySelector("input[type='checkbox']");
+    if (!input) return "表头无 input";
+    return `checked=${input.checked} indeterminate=${input.indeterminate} aria=${input.getAttribute("aria-checked")}`;
   }
 
   function isSelectAllChecked() {
@@ -819,6 +831,7 @@
     parseLimitNumber,
     findRowCheckboxes,
     selectFirstRows,
+    selectAllState,
     clearSelection,
     // 下载
     findSummaryButton,

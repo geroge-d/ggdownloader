@@ -311,7 +311,7 @@ const IMPORTANT_LOG_MAX = 60;
 function isImportant(type, context) {
   if (type === "error" || type === "warning" || type === "success") return true;
   // 这几个上下文的 info 也值得留
-  return ["batch", "limit", "chunk", "rules", "selfCheck", "settle", "clicks", "ledger", "repair"].includes(context);
+  return ["batch", "limit", "chunk", "rules", "selfCheck", "settle", "clicks", "ledger", "repair", "dlwait"].includes(context);
 }
 
 function pushImportant(type, message, context) {
@@ -1340,7 +1340,40 @@ async function selectAllAndVerify(rowCount, maxAttempts = 4) {
  * GG 的下载要用户手势才触发，所以这一步没法自动化；能做的是确保按钮真的
  * 可点、提示清楚、并且用户没点时如实记为"本批未完成"而不是悄悄跳过。
  */
-async function promptDownload(kind, expectedCount, startStr, endStr, rec) {
+// 点了下载之后，GG 要先在服务器上打包文件，浏览器才开始下载。GG 同一个用户的请求是排队处理的：
+// 文件没打包好之前去加载下一段列表，列表请求会一直排在后面（线上一个 450 条的概要包打包了 7 分钟，
+// 期间两次加载列表都等满 3 分钟超时）。所以每次点完下载，等浏览器真正开始下载再做下一步。
+const DOWNLOAD_START_WAIT_MS = 12 * 60 * 1000;   // 后台只认最后一次点击后 15 分钟内开始的下载
+
+function ggDownloadIds() {
+  return new Promise((resolve) => chrome.storage.local.get(['ggDownloads'], (r) => {
+    const list = Array.isArray(r && r.ggDownloads) ? r.ggDownloads : [];
+    resolve(list);
+  }));
+}
+
+async function waitForDownloadStart(clickedAtMs, idsBefore, label) {
+  const t0 = Date.now();
+  while (!stopFlag) {
+    await waitIfPaused();
+    const list = await ggDownloadIds();
+    const hit = list.find((d) => d && !idsBefore.has(d.id) && (d.startTime || 0) >= clickedAtMs - 3000);
+    const secs = Math.round((Date.now() - clickedAtMs) / 1000);
+    if (hit) {
+      log(`GG 用了 ${secs} 秒准备好${label}文件，浏览器已开始下载`, "dlwait");
+      return true;
+    }
+    if (Date.now() - t0 > DOWNLOAD_START_WAIT_MS) {
+      logWarning(`等了 ${secs} 秒${label}还没开始下载，先继续（实时GTO 核对时会发现，缺了会自动补）`, "dlwait");
+      return false;
+    }
+    updateStatus("info", `等待 GG 准备${label}文件（已等 ${secs} 秒）…下载开始后再继续，免得下一步排在它后面`);
+    await wait(1000);
+  }
+  return false;
+}
+
+async function promptDownload(kind, expectedCount, startStr, endStr, rec, opts = {}) {
   const label = kind === 'summary' ? '游戏概要' : '历史手牌记录';
   const finder = kind === 'summary' ? D.findSummaryButton : D.findHistoryButton;
 
@@ -1362,6 +1395,8 @@ async function promptDownload(kind, expectedCount, startStr, endStr, rec) {
     if (D.isDownloadReady(btn)) {
       const count = D.downloadCount(btn);
       log(`请点击下载${label}（${startStr} ~ ${endStr}，共 ${count} 条）`, 'promptDownload');
+      // 点之前记下已有的下载，点之后出现的新下载才是这一次的
+      const idsBefore = new Set((await ggDownloadIds()).map((d) => d && d.id));
       const clicked = await waitForUserClick(finder, kind, label, startStr, endStr, count);
       if (clicked) {
         // 点击时刻要立刻告诉后台：浏览器随后开始的下载才能和这次点击对上，
@@ -1384,6 +1419,8 @@ async function promptDownload(kind, expectedCount, startStr, endStr, rec) {
           });
         }
         if (!dialogHandled) return false;   // 只有用户停止才会 false
+        await waitForDownloadStart(clickedAtMs, idsBefore, label);
+        if (stopFlag) return false;
         logSuccess(`下载${label}已完成`, 'promptDownload');
         return true;
       }
@@ -1402,6 +1439,13 @@ async function promptDownload(kind, expectedCount, startStr, endStr, rec) {
     }
 
     recoverTries++;
+    if (opts.reselect) {
+      // 分趟时不能全选（会勾上整张表、超过上限），只重新勾回这一趟的那些行
+      logWarning(`${label}按钮不可用（上一次下载后 GG 清空了勾选），第 ${recoverTries} 次重新勾回这一趟的行`, 'promptDownload');
+      await opts.reselect();
+      await wait(randomBetween(500, 900));
+      continue;
+    }
     logWarning(
       `${label}按钮不可用（条数 ${D.downloadCount(btn)}，列表仍有 ${rows} 行）` +
       `—— 多半是上一次下载后选中被清空，第 ${recoverTries} 次重新全选`,
@@ -1705,6 +1749,10 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
   const pick = async (from, to) => {
     D.clearSelection();
     await wait(randomBetween(300, 600));
+    const left = D.downloadCount(D.findSummaryButton());
+    if (left > 0) {
+      logWarning(`清空勾选后概要按钮仍是 ${left} 条（表头 ${D.selectAllState()}），可能有看不见的已选行`, "chunk");
+    }
     const boxes = D.findRowCheckboxes();
     if (boxes.length !== total) {
       logWarning(`行数从 ${total} 变成 ${boxes.length}，表格被重渲染了，放弃分批`, "chunk");
@@ -1725,7 +1773,10 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
     }
     // 勾多了 GG 会弹"下载限制"遮罩，先关掉再说
     const limit = D.findLimitError();
-    if (limit || D.findLimitDialog()) await dismissLimitDialog("分趟勾选后");
+    if (limit || D.findLimitDialog()) {
+      logWarning(`勾第 ${from + 1}-${to} 行后出现"下载限制"：概要 ${s} / 手牌 ${h}，表头 ${D.selectAllState()}`, "limit");
+      await dismissLimitDialog("分趟勾选后");
+    }
     return { ok: true, sCount: s, hCount: h, limit: limit || null };
   };
 
@@ -1750,7 +1801,7 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
         const rows = to - from;
         const handsLike = sel.hCount > rows;   // 按钮数比行数还大，才当它是手数
         if (handsLike) perRow = sel.hCount / rows;
-        if (sel.limit && !wantH && handsLike) {
+        if (sel.limit && !wantH && handsLike && sel.hCount > handLimit * L.AUTO.HANDS_OVER) {
           handsBound = true;
           if (!summaryHandsBound) {
             summaryHandsBound = true;
@@ -1790,13 +1841,14 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
       const chunkRec = rec && Object.assign({}, rec, {
         chunk: String(round), rowRange: `${from + 1}-${to}`, rows, rowsExact: true,
       });
+      const reselect = () => pick(from, to);
       if (wantS) {
-        const ok = await promptDownload('summary', sel.sCount, text, endStr, chunkRec);
+        const ok = await promptDownload('summary', sel.sCount, text, endStr, chunkRec, { reselect });
         if (!ok) return false;
       }
       if (stopFlag) return false;
       if (wantH) {
-        const ok = await promptDownload('history', sel.hCount, text, endStr, chunkRec);
+        const ok = await promptDownload('history', sel.hCount, text, endStr, chunkRec, { reselect });
         if (!ok) return false;
       }
 

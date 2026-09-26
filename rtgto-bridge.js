@@ -218,10 +218,27 @@
     const now = Date.now();
     const recheck = (e) => e.verify && RECHECK.includes(e.verify.status) &&
       (e.verify.checks || 1) < MAX_CHECKS && now - e.clickedAtMs < RECHECK_MS;
+    // 已下完、还没被核对通过的点击占用的 GG 下载：刚点不久的点击也可能是它们的主人
+    const okPinned = new Set(attached
+      .filter((e) => e.download && e.download.id != null && e.verify && e.verify.status === "ok")
+      .map((e) => e.download.id));
+    // 已知的文件类型（实时GTO 告诉过的）：类型对不上的文件不算这次点击的候选
+    const knownKind = new Map();
+    for (const x of attached) {
+      for (const r of x.rejectedDownloads || []) if (r && r.fileKind) knownKind.set(r.id, r.fileKind);
+      if (x.download && x.download.id != null && x.download.fileKind) knownKind.set(x.download.id, x.download.fileKind);
+    }
+    const hasFileAfter = (e) => downloads.some((d) => {
+      if (d.state !== "complete" || okPinned.has(d.id) || (d.startTime || 0) < e.clickedAtMs - 3000) return false;
+      if ((e.rejectedDownloads || []).some((r) => r && r.id === d.id)) return false;
+      const k = knownKind.get(d.id);
+      return !k || k === "mixed" || k === e.kind;
+    });
     let toSend = attached.filter((e) =>
       e.status === "clicked" && e.clickedAtMs && (!e.verify || e.verify.status === "downloading" || recheck(e)) &&
-      // 下载还没开始、但刚点不久：再等等
-      !(!e.download && now - Ledger.graceStart(e) < START_GRACE_MS));
+      // 下载还没开始、但刚点不久：再等等。不过点击之后已经有下完的文件时照样发——
+      // 实时GTO 按内容配对，这次点击的文件可能被按时间配给了别的点击
+      !(!e.download && now - Ledger.graceStart(e) < START_GRACE_MS && !hasFileAfter(e)));
     if (o.onlyFinished) toSend = toSend.filter((e) => e.download && e.download.state !== "in_progress");
     if (!toSend.length) return { status: "nothing" };
 
