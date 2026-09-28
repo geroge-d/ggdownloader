@@ -378,8 +378,15 @@ copyLogBtn && copyLogBtn.addEventListener('click', async function () {
   const lastVerify = res && res.ggRtgtoLastVerify;
   const clickStats = Array.isArray(res && res.ggClickStats) ? res.ggClickStats.slice(-10) : [];
   const entries = st.importantLog || [];
+  // 版本号测试期间不变，靠构建编号看出用的是哪一版扩展
+  let build = '-';
+  try {
+    const r = await fetch(chrome.runtime.getURL('build-info.json'));
+    if (r.ok) build = (await r.json()).build || '-';
+  } catch (e) { /* 没有打包信息（直接加载源码） */ }
   const header = [
     `GGPoker助手 运行日志`,
+    `扩展: v${chrome.runtime.getManifest().version} 构建 ${build}`,
     `时间: ${new Date().toLocaleString()}`,
     `同步区间: ${st.syncFrom || '-'} ~ ${st.syncTo || '-'}`,
     `已同步至: ${st.lastSyncedDate || '-'}`,

@@ -256,13 +256,16 @@
 
           const clickedDays = daySet(clicked);
           const coveredDays = daySet(clicked.concat(noData));
-          // 没下到的日期：同一批分几趟下时，兄弟趟（同一次同步、同一批、同一段日期）下到了
-          // 不能算这一趟也下到了——日期完全一样，以前因此把缺的那一趟当成"已覆盖"，永远不补
-          const sibling = (a, b) => a.chunk && b.chunk && a.from === b.from && a.to === b.to &&
-            (a.runId || null) === (b.runId || null) && (a.batch || null) === (b.batch || null);
+          // 没下到的日期。分趟下载的每一趟只下了其中几行，记录上的日期却是整段：
+          // 某一趟下到了不能算别的趟也下到了（不管是不是同一次同步）——以前兄弟趟、
+          // 甚至上一次同步的某一趟都会把缺的那一趟"覆盖"掉，补下载的一趟被取消了照样显示完成。
+          // 分趟的记录只有整组（同一次、同一批、同一段日期）每一趟都没问题，才算这段日期下齐了。
+          const groupKey = (e) => [e.runId || "", e.batch || "", e.from, e.to].join("|");
+          const brokenGroups = new Set(mine.filter((e) => e.chunk && effectiveStatus(e) === "failed").map(groupKey));
+          const coverList = clicked.concat(noData).filter((x) => !x.chunk || !brokenGroups.has(groupKey(x)));
           const pendingDays = new Set();
           for (const f of failed) {
-            const cover = daySet(clicked.concat(noData).filter((x) => x !== f && !sibling(x, f)));
+            const cover = daySet(coverList.filter((x) => x !== f));
             for (const d of daySet([f])) if (!cover.has(d)) pendingDays.add(d);
           }
 
