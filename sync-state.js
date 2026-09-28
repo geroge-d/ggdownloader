@@ -82,6 +82,20 @@
     },
 
     /**
+     * 把水位线退回到 dateStr（只往回退）。只在确认之前某段被误判成"没数据"时用：
+     * 那段其实有对局，要重新下。
+     */
+    async rewind(pageType, dateStr) {
+      const all = await readAll();
+      const cur = all[pageType];
+      if (!cur || !cur.lastSyncedDate || !(dateStr < cur.lastSyncedDate)) return cur || null;
+      cur.lastSyncedDate = dateStr;
+      all[pageType] = cur;
+      await writeAll(all);
+      return cur;
+    },
+
+    /**
      * 只清除这一个分类（页面类型）的记录，其他分类不动。下次同步该分类从头来。
      * 分类必须给：以前"不传就全清"，页面还没识别出分类时点清除会把所有分类都清掉。
      */

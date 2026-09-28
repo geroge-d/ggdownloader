@@ -571,9 +571,11 @@
 
   // "8,411 游戏历史记录" 是 8411：只取开头一串数字会读成 8（线上核对就因此把按钮条数记错）。
   // 千位分隔符可能是逗号、点、空格或撇号。
+  // 只认开头的数字：手牌按钮在选中的比赛超出 3 个月时显示"最近3个月"（不可用），
+  // 以前把里面的 3 当成了手数。
   function parseCount(text) {
-    const m = String(text || "").match(/\d{1,3}(?:[,.\s  ']\d{3})+(?!\d)|\d+/);
-    return m ? parseInt(m[0].replace(/\D/g, ""), 10) : 0;
+    const m = String(text || "").match(/^\s*(\d{1,3}(?:[,.\s  ']\d{3})+(?!\d)|\d+)/);
+    return m ? parseInt(m[1].replace(/\D/g, ""), 10) : 0;
   }
 
   function isDownloadReady(button) {
@@ -624,6 +626,40 @@
   function isLoading() {
     const spinner = qsAny(R("spinner"));
     return !!spinner && isVisible(spinner);
+  }
+
+  const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+
+  /**
+   * 每一行比赛的开始日期（行首单元格，如 "Jun 22, 02:00"、"6月22日"、"2026-06-22"）。
+   * 页面上一般不带年份，取离 ref 最近的那一年。解析不了的行跳过。
+   */
+  function rowDates(ref) {
+    const scope = qsAny(R("sessionsScope"));
+    if (!scope) return [];
+    const refMs = ref ? ref.getTime() : Date.now();
+    const refYear = new Date(refMs).getFullYear();
+    const out = [];
+    scope.querySelectorAll("tbody tr").forEach((tr) => {
+      const cells = tr.querySelectorAll("td");
+      const text = ((cells[1] || cells[0] || tr).textContent || "") + " " + (tr.textContent || "").slice(0, 80);
+      let y = null, mo = null, d = null, m;
+      if ((m = text.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/))) { y = +m[1]; mo = +m[2] - 1; d = +m[3]; }
+      else if ((m = text.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})\b/i))) { mo = MONTHS[m[1].slice(0, 3).toLowerCase()]; d = +m[2]; }
+      else if ((m = text.match(/(\d{1,2})月(\d{1,2})日/))) { mo = +m[1] - 1; d = +m[2]; }
+      if (mo == null || !d) return;
+      if (y == null) {
+        let best = null;
+        for (const yy of [refYear - 1, refYear, refYear + 1]) {
+          const t = new Date(yy, mo, d).getTime();
+          if (best == null || Math.abs(t - refMs) < Math.abs(best - refMs)) best = t;
+        }
+        out.push(new Date(best));
+      } else {
+        out.push(new Date(y, mo, d));
+      }
+    });
+    return out;
   }
 
   function countRows() {
@@ -832,6 +868,7 @@
     findRowCheckboxes,
     selectFirstRows,
     selectAllState,
+    rowDates,
     clearSelection,
     // 下载
     findSummaryButton,

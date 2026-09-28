@@ -66,7 +66,7 @@
   const makeId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
   // 实时GTO核对后判定为"没下到"的状态；count_diff 只是条数对不上，算警告不算缺
-  const VERIFY_BAD = ["interrupted", "not_detected", "file_missing", "unreadable", "wrong_kind"];
+  const VERIFY_BAD = ["interrupted", "not_detected", "file_missing", "unreadable", "wrong_kind", "wrong_range"];
 
   /**
    * 一条记录"实际上"算什么：点了下载但浏览器下载中断、或实时GTO核对没找到文件，

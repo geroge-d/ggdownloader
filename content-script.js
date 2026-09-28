@@ -668,6 +668,22 @@ async function finishRunStats() {
 const DENSITY_KEY = 'ggDensity';
 const DENSITY_MAX_AGE_DAYS = 60;
 
+// 每个分类实测的 GG 列表加载速度（毫秒/行），下次同步第一批就能用；GG 快慢会变，只信 7 天内的
+const LOAD_SPEED_KEY = 'ggLoadSpeed';
+function loadLoadSpeed(pageType) {
+  return new Promise(resolve => chrome.storage.local.get([LOAD_SPEED_KEY], r => {
+    const d = r && r[LOAD_SPEED_KEY] && r[LOAD_SPEED_KEY][pageType];
+    resolve(d && d.msPerRow > 0 && Date.now() - d.at < 7 * 86400e3 ? d.msPerRow : null);
+  }));
+}
+function saveLoadSpeed(pageType, msPerRow) {
+  return new Promise(resolve => chrome.storage.local.get([LOAD_SPEED_KEY], r => {
+    const all = (r && r[LOAD_SPEED_KEY]) || {};
+    all[pageType] = { msPerRow: Math.round(msPerRow * 10) / 10, at: Date.now() };
+    chrome.storage.local.set({ [LOAD_SPEED_KEY]: all }, resolve);
+  }));
+}
+
 function loadDensity(pageType) {
   return new Promise(resolve => chrome.storage.local.get([DENSITY_KEY], r => {
     const d = r && r[DENSITY_KEY] && r[DENSITY_KEY][pageType];
@@ -1439,6 +1455,10 @@ async function promptDownload(kind, expectedCount, startStr, endStr, rec, opts =
     }
 
     recoverTries++;
+    if (opts.reselect && recoverTries > 3) {
+      logWarning(`${label}按钮重新勾选 3 次仍不可用（按钮显示"${((btn && btn.textContent) || '').replace(/\s+/g, ' ').trim()}"），这一趟放弃`, 'promptDownload');
+      return false;
+    }
     if (opts.reselect) {
       // 分趟时不能全选（会勾上整张表、超过上限），只重新勾回这一趟的那些行
       logWarning(`${label}按钮不可用（上一次下载后 GG 清空了勾选），第 ${recoverTries} 次重新勾回这一趟的行`, 'promptDownload');
@@ -2152,6 +2172,9 @@ async function loopDownload(opts = {}) {
   // 结果 7 个多月的数据一个没下。
   let loadTimeouts = 0;
   const MAX_LOAD_TIMEOUTS = 3;
+  // 本次同步里判成"没数据"的日期段：之后若在列表里看到属于这些日期的比赛，说明当时是误判，要退回去重下
+  const emptyRanges = [];
+  let dateMismatches = 0;
   // 可疑的空结果（期间有请求失败，或超过 2 分钟才空）：只重查前一半日期来确认。
   // 确认那一遍空且没失败就接受（哪怕也慢——GG 慢的时候小区间也要一两分钟），
   // 只推进这一半；出现了数据就说明刚才是失败。不计入超时中止：真没打牌的分类
@@ -2181,12 +2204,19 @@ async function loopDownload(opts = {}) {
   const historyCap = handsModel && handsModel.cap ? handsModel.cap : null;
   const baseCap = (inHistory) =>
     inHistory && historyCap ? historyCap : L.sessionCap(inHistory);
+  // GG 列表加载速度（毫秒/行）：一批的行数控制在约 LOAD_TARGET_MS 能加载完
+  let msPerRow = await loadLoadSpeed(pageType);
+  const rowsForLoad = () => msPerRow
+    ? Math.max(L.AUTO.LOAD_MIN_ROWS, Math.min(L.AUTO.BATCH_TARGET_ROWS,
+        Math.floor((L.AUTO.LOAD_TARGET_MS - L.AUTO.LOAD_OVERHEAD_MS) / msPerRow)))
+    : L.AUTO.BATCH_TARGET_ROWS;
+  if (msPerRow) log(`按上次测到的加载速度（约 ${msPerRow} 毫秒/行），每批控制在约 ${rowsForLoad()} 行`, "clicks");
   // 上次量出来的密度：第一批直接按它把这一批装到接近上限
   const savedDensity = repair ? null : await loadDensity(pageType);
   if (savedDensity) {
     // effectiveCap 在后面才定义，这里直接套一下学到的选中上限
     const base = baseCap(start >= earliestHistory);
-    const capStart = Math.max(learnedCap ? Math.min(learnedCap, base) : base, L.AUTO.BATCH_TARGET_ROWS);
+    const capStart = Math.min(Math.max(learnedCap ? Math.min(learnedCap, base) : base, L.AUTO.BATCH_TARGET_ROWS), rowsForLoad());
     const fit = Math.max(L.AUTO.MIN_SPAN, Math.min(L.AUTO.MAX_SPAN,
       Math.floor(capStart * L.AUTO.DENSITY_SAFETY / savedDensity.rate)));
     if (fit > span) {
@@ -2221,7 +2251,8 @@ async function loopDownload(opts = {}) {
     learnedCap ? Math.min(learnedCap, fallback) : fallback;
   // 批次大小瞄准的行数：超过单次上限的批次按行分趟下，所以瞄准 BATCH_TARGET_ROWS（的 95%），
   // 不再瞄准单次上限（那样每批都装不满，稍一超就要缩日期重做）
-  const sizeCapFor = (c) => Math.max(c, L.AUTO.BATCH_TARGET_ROWS);
+  // 再受加载速度限制：GG 慢的时候一批少一些行，列表不会等太久
+  const sizeCapFor = (c) => Math.min(Math.max(c, L.AUTO.BATCH_TARGET_ROWS), rowsForLoad());
   // 分趟时一趟最多勾多少行：概要按钮的上限（学到的更小就用学到的）
   const roundRows = () => effectiveCap(L.sessionCap(false));
 
@@ -2588,6 +2619,20 @@ async function loopDownload(opts = {}) {
           spanCeiling = Math.max(L.AUTO.MIN_SPAN, Math.min(L.AUTO.MAX_SPAN,
             Math.max(spanCeiling, batchDays * 2), Math.floor(slowSpan * 0.6)));
           log(`列表加载用了 ${secs} 秒（${batchDays} 天，${settle.rows} 行）`, "loopDownload");
+          // 按这次的"每行多少毫秒"更新加载速度，下一批的行数据此控制在约 1 分钟能加载完
+          if (settle.rows >= L.AUTO.LOAD_SAMPLE_MIN_ROWS) {
+            const loadMs = Date.now() - showClickedAt;
+            const per = Math.max(1, loadMs - L.AUTO.LOAD_OVERHEAD_MS) / settle.rows;
+            const before = rowsForLoad();
+            msPerRow = msPerRow ? msPerRow * 0.5 + per * 0.5 : per;
+            if (!repair) saveLoadSpeed(pageType, msPerRow);
+            const after = rowsForLoad();
+            if (Math.abs(after - before) > before * 0.1) {
+              (after < before ? logWarning : log)(
+                `GG 加载速度约 ${Math.round(msPerRow)} 毫秒/行，之后每批控制在约 ${after} 行（约 ${Math.round(L.AUTO.LOAD_TARGET_MS / 1000)} 秒能加载完）`,
+                "loopDownload");
+            }
+          }
         }
       }
       log(
@@ -2655,6 +2700,49 @@ async function loopDownload(opts = {}) {
       }
       if (settle.stable) loadTimeouts = 0;
 
+      // 5.7 列表里的比赛日期必须落在本批日期内（允许前后各 1 天的时区误差）。
+      //     线上：06-05~06-27 显示 0 行被判成没数据，下一批 06-28~07-24 却列出了 6 月 6~22 日的 425 场——
+      //     列表和筛选对不上（上一次查询的结果晚到了，或者日期没生效），照着下载会把数据记错日期，
+      //     还会把真正的 06-28~07-24 当成已下完。
+      if (settle.rows > 0) {
+        const dates = D.rowDates(roundStart);
+        const lo = roundStart.getTime() - L.MS_PER_DAY;
+        const hi = roundEnd.getTime() + 2 * L.MS_PER_DAY;
+        const outside = dates.filter((d) => d.getTime() < lo || d.getTime() >= hi);
+        if (dates.length && outside.length) {
+          const ms = dates.map((d) => d.getTime());
+          const minD = new Date(Math.min(...ms)), maxD = new Date(Math.max(...ms));
+          dateMismatches++;
+          logWarning(
+            `列表里是 ${L.fmt(minD)} ~ ${L.fmt(maxD)} 的比赛（${outside.length}/${dates.length} 行不在本批日期内），` +
+            `不是本批的 ${startStr} ~ ${endStr}：筛选没生效或上一次查询的结果晚到了，不能下载`,
+            "loopDownload"
+          );
+          // 这些比赛属于本次同步里判成"没数据"的某一段：当时是误判，退回那一段重下
+          const hit = emptyRanges.find((r) => r.start.getTime() <= maxD.getTime() + L.MS_PER_DAY &&
+                                               r.end.getTime() >= minD.getTime() - L.MS_PER_DAY);
+          if (hit) {
+            const back = new Date(hit.start.getTime() - L.MS_PER_DAY);
+            logWarning(`${hit.from} ~ ${hit.to} 之前被判成没数据，其实有对局：同步记录退回到 ${L.fmt(back)}，从 ${hit.from} 重新下`, "loopDownload");
+            if (!repair) await GG_SYNC.rewind(pageType, L.fmt(back));
+            emptyRanges.splice(emptyRanges.indexOf(hit));
+            doneDays = Math.max(0, doneDays - (L.diffDays(roundStart, hit.start)));
+            cursorStart = new Date(hit.start);
+            dateMismatches = 0;
+            redo('重做', `误判为没数据的 ${hit.from} ~ ${hit.to} 其实有对局，退回重下`);
+            continue;
+          }
+          if (dateMismatches <= MAX_FILTER_RETRY) {
+            redo('重做', `列表日期（${L.fmt(minD)} ~ ${L.fmt(maxD)}）和本批对不上`);
+            continue;   // 不 advance：重新设日期、重新加载
+          }
+          logStepFailure(`列表日期连续 ${dateMismatches} 次和本批对不上，本批放弃（不推进同步记录）`);
+          if (await bailOnFailure()) { record('中止', '列表日期始终对不上'); dumpJournal(); return; }
+          advance('失败', '列表日期和筛选对不上'); continue;
+        }
+        dateMismatches = 0;
+      }
+
       let rowCount = settle.rows;
       log(
         `本批列表 ${rowCount} 行` +
@@ -2718,6 +2806,7 @@ async function loopDownload(opts = {}) {
             log(`${startStr} ~ ${endStr} 重查确认没有数据（GG 只是慢；不超过 ${trustedEmptySpan} 天的慢速空结果之后直接接受）`, "loopDownload");
           }
           confirmingEmpty = false;
+          emptyRanges.push({ from: startStr, to: endStr, start: new Date(roundStart), end: new Date(roundEnd) });
           // 连续空 8 秒 + 复查仍空：这几天确实没打牌
           log(
             `${startStr} ~ ${endStr} 确认没有数据` +
@@ -2761,11 +2850,13 @@ async function loopDownload(opts = {}) {
 
       // 按已知密度重新定下一批的跨度（可大可小），瞄准每批约 BATCH_TARGET_ROWS 的 95%
       const resizeAfterBatch = () => {
-        const suggested = density.suggestSpan(sizeCap, span, false);
+        // 用最新的加载速度（这一批刚测过）
+        const target = sizeCapFor(cap);
+        const suggested = density.suggestSpan(target, span, false);
         if (suggested !== span) {
           log(
             `按密度（约 ${density.rate.toFixed(1)} 行/天）把跨度从 ${span} 天调到 ${suggested} 天` +
-            `（目标每批约 ${Math.round(sizeCap * L.AUTO.DENSITY_SAFETY)} 行）`,
+            `（目标每批约 ${Math.round(target * L.AUTO.DENSITY_SAFETY)} 行）`,
             "loopDownload"
           );
           span = suggested;
