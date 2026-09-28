@@ -302,12 +302,13 @@
         if (!r) return e;
         const n = Object.assign({}, e);
         if (a && a.download) n.download = a.download;   // 对上的下载固定下来，旧下载滚出列表后也不丢
-        // 实时GTO 按文件内容重新配过：用它配的那个下载（没有合适的就先解开，等它自己的文件）
+        // 实时GTO 按文件内容重新配过：用它配的那个下载（没有合适的就先解开，等它自己的文件）。
+        // 解开不重新计时：每次点击的 6 分钟从点击算起（线上每核一次就重算一次，
+        // 被取消的那趟一直"下载中"，6 分钟过了也没去补）
         if (r.repaired) {
           repaired++;
           const d = r.downloadId != null ? downloadsById.get(r.downloadId) : null;
           n.download = d ? Object.assign({}, d) : null;
-          if (!d) n.unpinnedAtMs = Date.now();
         }
         // 文件类型不对：多半是下载没按点击顺序开始、和相邻那次点击配反了（手牌包打包慢）。
         // 不算漏下，解开重新配：记下这个文件是什么，下次配对跳过它。同一条最多解开几次，防止打转。

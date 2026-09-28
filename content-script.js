@@ -732,7 +732,7 @@ let loopAbortMessage = null;
  * 失败的那段后来被补下载补齐、核对也通过了，同步记录却一直停在失败点之前（线上停在 06-28，
  * 下次同步要把早已下过的 93 天全部重下）。这里逐天看：同步记录之后的每一天都下过了
  * （或确认那天没打牌）才往前推，手牌只看 GG 保留的 3 个月内；遇到没覆盖的那天就停在它前一天。
- * 标着"没下到"的趟不会因此被跳过：它们还在下载记录里，同步结束的核对会补下（补下载只补同步记录以内的日期）。
+ * 标着"没下到"的趟不会因此被跳过：它们还在下载记录里，同步结束的核对会补下（补到这次同步的终点为止）。
  * 同步开始前和实时GTO 确认完整后各调一次。
  */
 async function advanceWatermarkByLedger(pageType, syncTo, why) {
@@ -744,10 +744,15 @@ async function advanceWatermarkByLedger(pageType, syncTo, why) {
   const cats = GG_LEDGER.summarize(list).filter((c) => c.pageType === pageType);
   const covered = (kind) => {
     const c = cats.find((x) => x.kind === kind);
+    const days = (ranges, fn) => {
+      for (const r of ranges || []) {
+        for (let t = L.parse(r.from).getTime(); t <= L.parse(r.to).getTime(); t += L.MS_PER_DAY) fn(L.fmt(new Date(t)));
+      }
+    };
     const set = new Set();
-    for (const r of (c && c.covered) || []) {
-      for (let t = L.parse(r.from).getTime(); t <= L.parse(r.to).getTime(); t += L.MS_PER_DAY) set.add(L.fmt(new Date(t)));
-    }
+    days(c && c.covered, (d) => set.add(d));
+    // 还缺着的（没下到、没补上）不算下过：同步记录停在它前面，补齐核对通过后再推
+    days(c && c.pending, (d) => set.delete(d));
     return set;
   };
   const cfg = currentPageConfig();
@@ -788,13 +793,26 @@ async function runAutomation() {
     }
     // 同步只保证"点了下载"。下没下到要等实时GTO 核对，缺的自动补，确认齐了才算完成。
     currentStatus.isRunning = true;
-    const done = await completenessPhase(currentPageType());
+    // 补下载会把 currentStatus.syncTo 改成补的那一段，这次同步的终点先记下
+    const syncTo = currentStatus.syncTo;
+    const done = await completenessPhase(currentPageType(), syncTo);
+    currentStatus.syncTo = syncTo;
     if (stopFlag) {
       logWarning("自动化流程被手动停止", "runAutomation");
       return;
     }
     if (done.confirmed) {
-      await advanceWatermarkByLedger(currentPageType(), currentStatus.syncTo, '实时GTO 已确认完整');
+      const pageType = currentPageType();
+      await advanceWatermarkByLedger(pageType, syncTo, '实时GTO 已确认完整');
+      // 下过的都齐了，但同步记录没到终点：说明中间有日期根本没下（不是没下到），不能说全部完成
+      const reached = (await GG_SYNC.get(pageType)).lastSyncedDate;
+      if (syncTo && reached && reached < syncTo) {
+        const next = L.fmt(new Date(L.parse(reached).getTime() + L.MS_PER_DAY));
+        const message = `已下载的都核对完整，但 ${next} 起还没有下载，同步记录停在 ${reached}，再点一次开始同步会从那里继续`;
+        logWarning(message, "runAutomation");
+        updateStatus("warning", message);
+        return;
+      }
       logSuccess("全部完成：实时GTO 已确认下载完整", "runAutomation");
       updateStatus("success", "全部完成：实时GTO 已确认下载完整");
     } else {
@@ -1026,8 +1044,10 @@ function storageGet(keys) {
 /**
  * 当前分类还要补下载的日期段（按实时GTO 的核对结果和下载记录现算）。
  * 超出 GG 保留期的补不了；晚于同步进度的交给下次同步。
+ * maxDate：同步结束后的核对传这次同步的终点 —— 这次同步里没下到的趟当场补，
+ * 哪怕它在同步记录之后（中间有一批失败时同步记录会停在失败点之前，线上因此只提示"下次继续"而没补）。
  */
-async function planRepairFor(pageType) {
+async function planRepairFor(pageType, maxDate) {
   const [list, st, saved] = await Promise.all([
     GG_LEDGER.getAll(),
     storageGet(['ggDownloads', 'ggRepairImport']),
@@ -1044,7 +1064,7 @@ async function planRepairFor(pageType) {
   const today = L.today();
   const clamp = (kind) => ({
     min: L.fmt(kind === 'summary' ? L.earliestSummaryDate(today) : L.earliestHistoryDate(today)),
-    max: saved.lastSyncedDate || '0000-00-00',
+    max: [saved.lastSyncedDate || '0000-00-00', maxDate || ''].sort().pop(),
   });
   const plan = GG_LEDGER.planRepair(pending.concat(imported), pageType, clamp);
   // 还没核完的（下载中 / 从没核对过）：这些没结果前不能说"齐了"
@@ -1058,7 +1078,7 @@ async function planRepairFor(pageType) {
  * 同步之后的收尾：核对 -> 缺的自动补下载 -> 再核对，直到实时GTO 确认没有缺的。
  * 返回 { confirmed, message }。
  */
-async function completenessPhase(pageType) {
+async function completenessPhase(pageType, syncTo) {
   const rangeText = (g) => g.ranges.map(r => r.from === r.to ? r.from : `${r.from}~${r.to}`).join('，');
   let repairedOffline = false;
   for (let round = 0; ; round++) {
@@ -1068,7 +1088,7 @@ async function completenessPhase(pageType) {
     const v = await waitForVerification();
     if (!v || v.ok === false || v.connected === false) {
       // 连不上实时GTO 也先把已经核对出来缺的日期段补下（不能因为确认不了就连补都不补）
-      const known = await planRepairFor(pageType);
+      const known = await planRepairFor(pageType, syncTo);
       if (known.segments.length && !repairedOffline && round < MAX_REPAIR_ROUNDS) {
         repairedOffline = true;
         logWarning(
@@ -1098,7 +1118,7 @@ async function completenessPhase(pageType) {
       if (n) logWarning(`还有 ${n} 个下载没核对完，当作没下到，直接重新下载这几段`, "ledger");
     }
 
-    const plan = await planRepairFor(pageType);
+    const plan = await planRepairFor(pageType, syncTo);
     for (const g of plan.expired) {
       logWarning(`${g.kind === 'summary' ? '游戏概览' : '历史手牌'} ${rangeText(g)} 已超出 GG 保留期，没法再补`, "ledger");
     }
@@ -1930,7 +1950,11 @@ function saveSummaryHandsBound() {
   });
 }
 
+// 分趟下载没下完时，是哪几类没下完（概要那一遍失败时手牌还没开始，两类都算）；null 表示这一批都没下
+let chunkFailedKinds = null;
+
 async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, rec, want = {}) {
+  chunkFailedKinds = null;
   const wantSummary = want.wantSummary !== false;
   const wantHistory = want.wantHistory !== false;
   const doSummary = wantSummary && currentPageConfig().hasSummary;
@@ -2031,6 +2055,13 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
         logWarning(`第 ${round} 趟只勾 ${to - from} 行仍然超限：${sel.limit.text}，放弃分批（下次会用更小的上限）`, "chunk");
         return false;
       }
+      // 只下手牌的一遍：这几行有比赛（概要数 > 0）却一手牌都没有 —— 它们早于 GG 手牌保留的最近 3 个月
+      // （GG 的窗口比按日期算的晚一两天），没有可下的，跳过这几行，不算失败
+      if (wantH && !wantS && sel.hCount === 0 && sel.sCount > 0) {
+        log(`第 ${round} 趟：第 ${from + 1}-${to} 行有 ${sel.sCount} 场比赛但 GG 没有手牌（早于 GG 保留的最近 3 个月），跳过`, "chunk");
+        from = to;
+        continue;
+      }
       if ((wantS ? sel.sCount : 0) === 0 && (wantH ? sel.hCount : 0) === 0) {
         logWarning(`第 ${round} 趟勾选后条数仍为 0，放弃分批`, "chunk");
         return false;
@@ -2049,7 +2080,7 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
         if (!ok) return false;
       }
       if (stopFlag) return false;
-      if (wantH) {
+      if (wantH && sel.hCount > 0) {   // 概要+手牌一起下时，没有手牌的那趟不点手牌
         const ok = await promptDownload('history', sel.hCount, text, endStr, chunkRec, { reselect });
         if (!ok) return false;
       }
@@ -2071,10 +2102,10 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
   // 概要和手牌分开分趟：各自装满各自的上限（概要 500 条一趟，手牌 2 万手一趟），
   // 比每趟两个都点省：同一段 1900 行、15 万手，一起点要 16 次，分开只要 4 + 8 次
   if (doSummary && doHistory && summaryHandsBound) {
-    if (!(await pass(true, true, '概要+手牌'))) return false;
+    if (!(await pass(true, true, '概要+手牌'))) { chunkFailedKinds = ['summary', 'history']; return false; }
   } else {
-    if (doSummary && !(await pass(true, false, '概要'))) return false;
-    if (doHistory && !(await pass(false, true, '手牌'))) return false;
+    if (doSummary && !(await pass(true, false, '概要'))) { chunkFailedKinds = doHistory ? ['summary', 'history'] : ['summary']; return false; }
+    if (doHistory && !(await pass(false, true, '手牌'))) { chunkFailedKinds = ['history']; return false; }
   }
   D.clearSelection();
   logSuccess(`${startStr} ~ ${endStr} 分 ${round} 趟下载完成`, "chunk");
@@ -2618,13 +2649,18 @@ async function loopDownload(opts = {}) {
     // 这里补"确认没数据"和"没下成"两种，核对时才能区分"本来就没有"和"漏了"。
     const LEDGER_STATUS = { '无数据': 'no_data', '失败': 'failed', '未下载': 'failed', '异常': 'failed', '中止': 'failed' };
 
-    /** 写一条流水账。status 说明这批的结局，note 说明原因。 */
-    const record = (status, note) => {
+    /**
+     * 写一条流水账。status 说明这批的结局，note 说明原因。
+     * opts.kinds 只记这几类没下成；opts.chunk 表示分趟下到一半失败 —— 记录标成分趟的，
+     * 同一批已经下完的那几趟就不会把它"覆盖"掉（日期完全一样），核对时照样补这一批。
+     */
+    const record = (status, note, opts = {}) => {
       statBatch(status, note, batchDays);
       const ledgerStatus = LEDGER_STATUS[status];
       if (ledgerStatus) {
-        for (const kind of expectedKinds()) {
-          recordLedger(batchRec(), kind, ledgerStatus, { note: note || status });
+        const kinds = expectedKinds().filter(k => !opts.kinds || opts.kinds.includes(k));
+        for (const kind of kinds) {
+          recordLedger(batchRec(), kind, ledgerStatus, Object.assign({ note: note || status }, opts.chunk ? { chunk: '未完成' } : {}));
         }
       }
       const entry = {
@@ -2649,10 +2685,10 @@ async function loopDownload(opts = {}) {
     };
 
     /** 结束本批并把游标推到下一段。status/note 会进流水账。 */
-    const advance = (status, note) => {
+    const advance = (status, note, opts) => {
       if (advanced) return;
       advanced = true;
-      if (status) record(status, note);
+      if (status) record(status, note, opts);
       redoCount = 0;   // 这一段过去了，重做计数清零
       doneDays += batchDays;
       currentStatus.currentRound = Math.min(doneDays, spanDays);
@@ -3064,8 +3100,9 @@ async function loopDownload(opts = {}) {
         if (!ok) {
           if (stopFlag) { stopNow(); return true; }
           contiguous = false;
-          if (await bailOnFailure()) { record('中止', '分趟下载异常'); dumpJournal(); return true; }
-          advance('未下载', `分趟下载未完成（上限 ${capHint}）`);
+          const failed = { kinds: chunkFailedKinds, chunk: true };
+          if (await bailOnFailure()) { record('中止', '分趟下载异常', failed); dumpJournal(); return true; }
+          advance('未下载', `分趟下载未完成（上限 ${capHint}）`, failed);
           return false;
         }
         failStreak = 0;
