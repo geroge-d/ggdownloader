@@ -725,6 +725,51 @@ async function learnHandsPerRow(pageType) {
 // 同步中途因页面异常中止时的原因：有它就不进核对阶段，状态停在这条提示上
 let loopAbortMessage = null;
 
+/**
+ * 按下载记录把同步记录推进到连续覆盖到的最后一天（不超过 syncTo）。
+ *
+ * 同步中途有一批失败时，之后下成功的批次也不推进同步记录（免得跳过失败的那段）；
+ * 失败的那段后来被补下载补齐、核对也通过了，同步记录却一直停在失败点之前（线上停在 06-28，
+ * 下次同步要把早已下过的 93 天全部重下）。这里逐天看：同步记录之后的每一天都下过了
+ * （或确认那天没打牌）才往前推，手牌只看 GG 保留的 3 个月内；遇到没覆盖的那天就停在它前一天。
+ * 标着"没下到"的趟不会因此被跳过：它们还在下载记录里，同步结束的核对会补下（补下载只补同步记录以内的日期）。
+ * 同步开始前和实时GTO 确认完整后各调一次。
+ */
+async function advanceWatermarkByLedger(pageType, syncTo, why) {
+  if (!pageType || !syncTo || !GG_LEDGER) return;
+  const saved = await GG_SYNC.get(pageType);
+  const from = saved.lastSyncedDate;
+  if (!from || from >= syncTo) return;
+  const list = await GG_LEDGER.getAll();
+  const cats = GG_LEDGER.summarize(list).filter((c) => c.pageType === pageType);
+  const covered = (kind) => {
+    const c = cats.find((x) => x.kind === kind);
+    const set = new Set();
+    for (const r of (c && c.covered) || []) {
+      for (let t = L.parse(r.from).getTime(); t <= L.parse(r.to).getTime(); t += L.MS_PER_DAY) set.add(L.fmt(new Date(t)));
+    }
+    return set;
+  };
+  const cfg = currentPageConfig();
+  const summaryDays = cfg.hasSummary ? covered('summary') : null;
+  const historyDays = covered('history');
+  const earliestHistory = L.earliestHistoryDate(L.today()).getTime();
+  let last = from;
+  for (let t = L.parse(from).getTime() + L.MS_PER_DAY; t <= L.parse(syncTo).getTime(); t += L.MS_PER_DAY) {
+    const d = L.fmt(new Date(t));
+    const okSummary = !summaryDays || summaryDays.has(d);
+    const okHistory = t < earliestHistory || historyDays.has(d);
+    if (!okSummary || !okHistory) break;
+    last = d;
+  }
+  if (last > from) {
+    await GG_SYNC.advance(pageType, last, {});
+    currentStatus.lastSyncedDate = last;
+    log(`${why}，同步记录从 ${from} 推进到 ${last}` +
+      (last < syncTo ? `（${L.fmt(new Date(L.parse(last).getTime() + L.MS_PER_DAY))} 起还没有下载记录，下次从那里继续）` : ''), "ledger");
+  }
+}
+
 async function runAutomation() {
   runStats = newRunStats(currentPageType());
   loopAbortMessage = null;
@@ -749,6 +794,7 @@ async function runAutomation() {
       return;
     }
     if (done.confirmed) {
+      await advanceWatermarkByLedger(currentPageType(), currentStatus.syncTo, '实时GTO 已确认完整');
       logSuccess("全部完成：实时GTO 已确认下载完整", "runAutomation");
       updateStatus("success", "全部完成：实时GTO 已确认下载完整");
     } else {
@@ -2239,6 +2285,8 @@ async function loopDownload(opts = {}) {
   const wantSummary = !opts.kinds || opts.kinds.includes('summary');
   const wantHistory = !opts.kinds || opts.kinds.includes('history');
 
+  // 之前下过、但因为中途有批次失败没推进同步记录的日期：先按下载记录推过去，免得整段重下
+  if (!repair) await advanceWatermarkByLedger(pageType, L.fmt(L.today()), '按下载记录这些日期都已经下过');
   // 同步区间不再由用户选，而是"上次同步到哪天的第二天 ~ 今天"
   const saved = await GG_SYNC.get(pageType);
   const plan = repair

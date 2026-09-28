@@ -23,6 +23,16 @@
   const STORAGE_KEY = "ggDownloadLedger";
   // 一整年的同步大约一两百条，留 8000 条足够；再多就丢最旧的，免得撑爆 storage 配额
   const MAX_ENTRIES = 8000;
+
+  // 超过上限时删最旧的，但"没下到 / 失败"的记录留到最后才删：补下载清单靠它们，
+  // 删掉了那段日期就再也不会被补（重启浏览器也不会丢，记录都在本地存储里）
+  function trimOldest(list, n) {
+    const bad = (e) => e.status === "failed" || (e.verify && VERIFY_BAD.includes(e.verify.status));
+    for (let i = 0; i < list.length && n > 0; ) {
+      if (!bad(list[i])) { list.splice(i, 1); n--; } else i++;
+    }
+    if (n > 0) list.splice(0, n);
+  }
   const FORMAT_VERSION = 1;
 
   const KINDS = ["summary", "history"];
@@ -143,7 +153,7 @@
       chain = chain.then(async () => {
         const list = await readAll();
         list.push(rec);
-        if (list.length > MAX_ENTRIES) list.splice(0, list.length - MAX_ENTRIES);
+        if (list.length > MAX_ENTRIES) trimOldest(list, list.length - MAX_ENTRIES);
         await writeAll(list);
       });
       return chain;
