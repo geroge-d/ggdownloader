@@ -246,7 +246,15 @@
 
           const clickedDays = daySet(clicked);
           const coveredDays = daySet(clicked.concat(noData));
-          const pendingDays = new Set([...daySet(failed)].filter((d) => !coveredDays.has(d)));
+          // 没下到的日期：同一批分几趟下时，兄弟趟（同一次同步、同一批、同一段日期）下到了
+          // 不能算这一趟也下到了——日期完全一样，以前因此把缺的那一趟当成"已覆盖"，永远不补
+          const sibling = (a, b) => a.chunk && b.chunk && a.from === b.from && a.to === b.to &&
+            (a.runId || null) === (b.runId || null) && (a.batch || null) === (b.batch || null);
+          const pendingDays = new Set();
+          for (const f of failed) {
+            const cover = daySet(clicked.concat(noData).filter((x) => x !== f && !sibling(x, f)));
+            for (const d of daySet([f])) if (!cover.has(d)) pendingDays.add(d);
+          }
 
           out.push({
             pageType,

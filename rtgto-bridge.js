@@ -16,7 +16,8 @@
   const PORTS = [47651, 47652, 47653];
   const BASE = "/gg-bridge/v1";
   const PROTOCOL = 1;
-  const HELLO_TIMEOUT_MS = 1500;
+  // 实时GTO 导入上万手时一时顾不上回应，1.5 秒太短会被误当成"没打开"（线上同步因此半路放弃核对）
+  const HELLO_TIMEOUT_MS = 5000;
   // 核对时实时GTO 要解析、导入、备份文件，文件多时要一会儿
   const VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
 

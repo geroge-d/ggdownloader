@@ -306,7 +306,8 @@ function logStepFailure(step, extra) {
 //
 // 什么算重要：警告、错误、成功，以及批次结束这类里程碑。
 // 每一步的琐碎信息（点了哪个元素、等了多久）只进控制台，不占状态栏。
-const IMPORTANT_LOG_MAX = 60;
+// 保留整次同步的要紧日志（线上一次同步十几分钟，60 条只剩最后两分钟，看不出前面哪一批失败了）
+const IMPORTANT_LOG_MAX = 400;
 
 function isImportant(type, context) {
   if (type === "error" || type === "warning" || type === "success") return true;
@@ -920,11 +921,29 @@ async function waitForVerification() {
     if (p && p.connected) rt = p;
     render();
   }, RTGTO_PROGRESS_POLL_MS);
+  // 一时连不上但之前连着：多半是实时GTO 正忙着导入、顾不上回应，继续等；连续这么久都连不上才放弃
+  const DISCONNECT_TOLERANCE_MS = 3 * 60 * 1000;
+  let everConnected = false;
+  let disconnectedSince = 0;
   try {
     for (;;) {
       const v = await verifyWithRtgto();
       lastV = v;
-      if (!v || v.ok === false || v.connected === false || v.status === 'error') return v;
+      const lost = !v || v.ok === false || v.connected === false || v.status === 'error';
+      if (lost) {
+        if (!everConnected) return v;
+        const first = !disconnectedSince;
+        if (first) disconnectedSince = Date.now();
+        const gone = Date.now() - disconnectedSince;
+        if (gone > DISCONNECT_TOLERANCE_MS) return v;
+        updateVerifyModal({ text: `实时GTO 暂时没有回应（可能正忙着导入），已等 ${Math.round(gone / 1000)} 秒，继续等…`, file: '', fraction: null });
+        if (first || secs() % 30 < VERIFY_POLL_MS / 1000) log(`实时GTO 暂时没有回应（${Math.round(gone / 1000)} 秒），多半在忙着导入，继续等`, "ledger");
+        await wait(VERIFY_POLL_MS);
+        if (stopFlag) return v;
+        continue;
+      }
+      everConnected = true;
+      disconnectedSince = 0;
       if (v.progress) rt = Object.assign({ connected: true }, v.progress);
       const waiting = (v.notStarted || 0) + (v.downloading || 0);
       if (v.status !== 'busy' && !waiting) return v;
@@ -995,13 +1014,31 @@ async function planRepairFor(pageType) {
  */
 async function completenessPhase(pageType) {
   const rangeText = (g) => g.ranges.map(r => r.from === r.to ? r.from : `${r.from}~${r.to}`).join('，');
+  let repairedOffline = false;
   for (let round = 0; ; round++) {
     if (stopFlag) return { confirmed: false, message: '已停止' };
     updateStatus("info", round === 0 ? "同步完成，等待实时GTO 核对下载…" : `第 ${round} 轮补下载完成，等待实时GTO 核对…`);
     log(`等待实时GTO 核对（第 ${round + 1} 次）`, "ledger");
     const v = await waitForVerification();
     if (!v || v.ok === false || v.connected === false) {
-      const message = '没有连上实时GTO，无法确认下载是否完整。请打开实时GTO「GG数据导入」后再点一次开始同步。';
+      // 连不上实时GTO 也先把已经核对出来缺的日期段补下（不能因为确认不了就连补都不补）
+      const known = await planRepairFor(pageType);
+      if (known.segments.length && !repairedOffline && round < MAX_REPAIR_ROUNDS) {
+        repairedOffline = true;
+        logWarning(
+          `实时GTO 暂时连不上，先把之前核对出来缺的 ${known.segments.length} 段补下：` +
+          known.segments.map(s => `${s.from}~${s.to}[${s.kinds.join('+')}]`).join('，'),
+          "repair"
+        );
+        const r = await repairSegments(known.segments);
+        if (r.aborted) {
+          return { confirmed: false, message: stopFlag ? '已停止' : '补下载中断（页面操作失败），请刷新页面后再点开始同步' };
+        }
+        continue;   // 补完再试一次核对（可能已经连上了）
+      }
+      const message = '没有连上实时GTO，无法确认下载是否完整' +
+        (repairedOffline ? '（已先补下之前核对出来缺的日期段）' : '') +
+        '。请打开实时GTO「GG数据导入」后再点一次开始同步。';
       logWarning(message, "ledger");
       return { confirmed: false, message };
     }
