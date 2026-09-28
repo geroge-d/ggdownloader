@@ -847,7 +847,7 @@ function verifyWithRtgto() {
 // 只有连续 NO_PROGRESS_MS 毫无进展（没有新下载、字节不涨、实时GTO 也没在处理）才停，
 // 停下时没核对完的也当成没下到去补。
 const VERIFY_POLL_MS = 5000;
-const NO_PROGRESS_MS = (typeof window !== 'undefined' && window.__ggTestNoProgressMs) || 4 * 60 * 1000;
+const NO_PROGRESS_MS = (typeof window !== 'undefined' && window.__ggTestNoProgressMs) || 150 * 1000;   // 2.5 分钟（用户要求）
 
 /**
  * 等核对超时后，把这个分类里还没核对完的点击（没开始下载 / 还在下载 / 没核对）记成"没下到"，
@@ -986,7 +986,7 @@ async function waitForVerification() {
     render();
   }, RTGTO_PROGRESS_POLL_MS);
   // 一时连不上但之前连着：多半是实时GTO 正忙着导入、顾不上回应，继续等；连续这么久都连不上才放弃
-  const DISCONNECT_TOLERANCE_MS = 3 * 60 * 1000;
+  const DISCONNECT_TOLERANCE_MS = 150 * 1000;   // 2.5 分钟（用户要求）
   let everConnected = false;
   let disconnectedSince = 0;
   try {
