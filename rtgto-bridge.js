@@ -161,14 +161,10 @@
   const MAX_CHECKS = 3;
   // 点了下载之后 GG 要先在服务器上打包，浏览器过一会儿才开始下载。
   // 这段时间里还没对上下载的点击先不核对（否则会被判成"没出现下载"去白补一次）。
-  const START_GRACE_MS = 3 * 60 * 1000;
-  // 连着点了好几个下载时 GG 排队打包，后面那些可能点了 3 分钟以上才开始下载：
-  // 只要最近 3 分钟内还有 GG 下载开始（队列在动），就继续等，最长 12 分钟
-  const QUEUE_GRACE_MS = 12 * 60 * 1000;
+  // 每次点击各自计时：点击后 6 分钟还没开始下载就算没下到（用户要求），核对判为缺失、自动补下载
+  const START_GRACE_MS = 6 * 60 * 1000;
   function inGrace(Ledger, e, downloads, now) {
-    if (now - Ledger.graceStart(e) < START_GRACE_MS) return true;
-    const moving = (downloads || []).some((d) => d && now - (d.startTime || 0) < START_GRACE_MS);
-    return moving && now - Ledger.graceStart(e) < QUEUE_GRACE_MS;
+    return now - Ledger.graceStart(e) < START_GRACE_MS;
   }
   // 同一次点击因"文件类型不符"最多解开重配几次
   const MAX_UNPIN = 3;

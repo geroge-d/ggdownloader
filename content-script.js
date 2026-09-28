@@ -777,11 +777,35 @@ function verifyWithRtgto() {
 }
 
 // 下载要时间：GG 先在服务器上打包，浏览器再下载，大文件还要下一阵。
-// 只要还有进展（新下载开始、字节在涨、核对结果在变）就一直等；
-// 连续 NO_PROGRESS_MS 没动静或总共等满 MAX_WAIT_MS 才停，停下时如实说还有几个没核完。
+// 每次点击各自计时：点击后 6 分钟（GG_RTGTO.START_GRACE_MS）还没开始下载就算没下到，
+// 核对时判为缺失、自动补下载（用户要求）。已经开始下载的照常等它下完、核对完，不设总时长（用户要求）；
+// 只有连续 NO_PROGRESS_MS 毫无进展（没有新下载、字节不涨、实时GTO 也没在处理）才停，
+// 停下时没核对完的也当成没下到去补。
 const VERIFY_POLL_MS = 5000;
-const NO_PROGRESS_MS = 4 * 60 * 1000;
-const MAX_WAIT_MS = 30 * 60 * 1000;
+const NO_PROGRESS_MS = (typeof window !== 'undefined' && window.__ggTestNoProgressMs) || 4 * 60 * 1000;
+
+/**
+ * 等核对超时后，把这个分类里还没核对完的点击（没开始下载 / 还在下载 / 没核对）记成"没下到"，
+ * 交给补下载。记成没下到而不是一直算"等待中"：补下载下到之后这些日期就算补齐了，
+ * 下一轮不会再重复补；原来的下载要是之后才下完，多出来的一份实时GTO 导入时会去重。
+ */
+async function markUnverifiedAsMissing(pageType) {
+  let n = 0;
+  const at = GG_LEDGER.localIso(Date.now());
+  await GG_LEDGER.update((all) => all.map((e) => {
+    if (e.pageType !== pageType || e.status !== 'clicked' || !e.clickedAtMs) return e;
+    if (e.verify && e.verify.status !== 'downloading') return e;
+    n++;
+    return Object.assign({}, e, {
+      verify: {
+        status: 'not_detected', detail: '等核对时长时间毫无进展，当作没下到',
+        items: null, matchedBy: null, metrics: null, at,
+        checks: ((e.verify && e.verify.checks) || 0) + 1,
+      },
+    });
+  }));
+  return n;
+}
 
 // —— 等实时GTO 核对时的模态进度框 ——
 // 实时GTO 导入上万手要几分钟，这段时间页面上什么都不动，用户以为卡死了。
@@ -911,8 +935,8 @@ async function waitForVerification() {
         lastSig = sig;
         lastChange = Date.now();
       }
-      if (Date.now() - lastChange > NO_PROGRESS_MS || Date.now() - started > MAX_WAIT_MS) {
-        logWarning(`等下载 ${secs()} 秒仍有 ${waiting} 个没完成，先停止等待`, "ledger");
+      if (Date.now() - lastChange > NO_PROGRESS_MS) {
+        logWarning(`等了 ${secs()} 秒仍有 ${waiting} 个没核对完（连续 ${Math.round(NO_PROGRESS_MS / 1000)} 秒毫无进展），先停止等待`, "ledger");
         return Object.assign({}, v, { timedOut: true });
       }
       render();
@@ -985,6 +1009,10 @@ async function completenessPhase(pageType) {
       const message = `实时GTO 核对出错：${v.error || '-'}`;
       logWarning(message, "ledger");
       return { confirmed: false, message };
+    }
+    if (v.timedOut) {
+      const n = await markUnverifiedAsMissing(pageType);
+      if (n) logWarning(`还有 ${n} 个下载没核对完，当作没下到，直接重新下载这几段`, "ledger");
     }
 
     const plan = await planRepairFor(pageType);
@@ -1363,7 +1391,8 @@ async function selectAllAndVerify(rowCount, maxAttempts = 4) {
 // 文件没打包好之前去加载下一段列表，列表请求会排在后面（线上一个 450 条的概要包打包了 7 分钟）。
 // 扩展不等下载开始（用户要求并行），而是在后台对上号（trackDownloadStart）；列表加载真排在后面时，
 // waitForTableSettled 把排队时间不算进超时。一个下载最多等这么久还没开始，就交给同步结束后的核对。
-const DOWNLOAD_START_WAIT_MS = 12 * 60 * 1000;   // 后台只认最后一次点击后 15 分钟内开始的下载
+// 每次点击最多等 6 分钟开始下载（和核对规则一致：6 分钟还没下载就算没下到、自动补）
+const DOWNLOAD_START_WAIT_MS = 6 * 60 * 1000;
 
 function ggDownloadIds() {
   return new Promise((resolve) => chrome.storage.local.get(['ggDownloads'], (r) => {
