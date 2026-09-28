@@ -61,6 +61,8 @@ function updateUI(status) {
   }
   
   renderVerifyLock(status.verifyWait);
+  lastRunStatus = status;
+  renderActivity();
   // 更新状态显示
   renderLog(status);
   // 进度按"天"算：批次跨度会自动调整，总批次数事先算不出来
@@ -84,6 +86,55 @@ function updateUI(status) {
   if (totalRoundsSpan) totalRoundsSpan.textContent = totalRounds;
   if (currentRoundSpan) currentRoundSpan.textContent = currentRound;
 }
+
+// —— 下载核对卡片里的"正在进行"：让用户随时知道扩展在等什么 ——
+let lastRunStatus = null;
+let rtProgress = null;       // 实时GTO 此刻在做什么（hello 里的 progress）
+let rtProgressAt = 0;
+
+function renderActivity() {
+  const el = document.getElementById('rtgto-activity');
+  if (!el) return;
+  const lines = [];
+  const now = Date.now();
+  const a = lastRunStatus && lastRunStatus.activity;
+  if (a && a.kind === 'dlwait' && now - (a.at || 0) < 5000) {
+    lines.push(t('activity_dlwait', { label: a.label || '', secs: a.secs || 0 }));
+  }
+  const running = (lastDownloads || []).filter((d) => d && d.state === 'in_progress');
+  if (running.length) {
+    const mb = (running.reduce((n, d) => n + (d.bytes || 0), 0) / 1048576).toFixed(1);
+    lines.push(t('activity_downloading', { n: running.length, mb }));
+  }
+  if (rtProgress && now - rtProgressAt < 10000) {
+    if (rtProgress.importing && rtProgress.total > 0) {
+      lines.push(t('activity_rt_import', { i: Math.min(rtProgress.processed + 1, rtProgress.total), n: rtProgress.total }));
+    } else if (rtProgress.verifying) {
+      lines.push(t('activity_rt_verify', { q: rtProgress.queued || 0 }));
+    }
+  }
+  const waiting = (lastLedger || []).filter((x) => x.status === 'clicked' && x.clickedAtMs &&
+    (!x.verify || x.verify.status === 'downloading')).length;
+  if (waiting && (lines.length || (lastRunStatus && lastRunStatus.isRunning))) {
+    lines.push(t('activity_waiting_verify', { n: waiting }));
+  }
+  el.innerHTML = lines.map((l) => `<div>${escapeHtml(l)}</div>`).join('');
+}
+
+// 有事在进行时每 2 秒问一次实时GTO 在做什么（没事就不问，省得一直发请求）
+setInterval(async () => {
+  if (document.visibilityState !== 'visible' || !Bridge || !rtgto.ok) return;
+  const busy = (lastRunStatus && lastRunStatus.isRunning) || rtgtoVerifying ||
+    (lastDownloads || []).some((d) => d && d.state === 'in_progress') ||
+    (lastLedger || []).some((x) => x.status === 'clicked' && x.clickedAtMs && (!x.verify || x.verify.status === 'downloading'));
+  if (!busy) { rtProgress = null; renderActivity(); return; }
+  try {
+    const p = await Bridge.progress();
+    rtProgress = p && p.connected ? p : null;
+    rtProgressAt = Date.now();
+  } catch (e) { rtProgress = null; }
+  renderActivity();
+}, 2000);
 
 // 等实时GTO 核对期间（页面上有模态进度框）侧边栏也整个锁住，显示同样的进度
 function renderVerifyLock(wait) {

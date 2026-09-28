@@ -761,6 +761,7 @@ async function runAutomation() {
     currentStatus.isRunning = false;
     currentStatus.isPaused = false;
     currentStatus.verifyWait = null;
+    currentStatus.activity = null;
     chrome.storage.local.set({ ggpokerStatus: currentStatus });
   }
 }
@@ -1377,16 +1378,26 @@ async function waitForDownloadStart(clickedAtMs, idsBefore, label) {
     const secs = Math.round((Date.now() - clickedAtMs) / 1000);
     if (hit) {
       log(`GG 用了 ${secs} 秒准备好${label}文件，浏览器已开始下载`, "dlwait");
+      setActivity(null);
       return true;
     }
     if (Date.now() - t0 > DOWNLOAD_START_WAIT_MS) {
       logWarning(`等了 ${secs} 秒${label}还没开始下载，先继续（实时GTO 核对时会发现，缺了会自动补）`, "dlwait");
+      setActivity(null);
       return false;
     }
+    // 侧边栏"下载核对"卡片据此实时显示在等什么
+    currentStatus.activity = { kind: 'dlwait', label, secs, at: Date.now() };
     updateStatus("info", `等待 GG 准备${label}文件（已等 ${secs} 秒）…下载开始后再继续，免得下一步排在它后面`);
     await wait(1000);
   }
+  setActivity(null);
   return false;
+}
+
+function setActivity(a) {
+  currentStatus.activity = a;
+  chrome.storage.local.set({ ggpokerStatus: currentStatus });
 }
 
 async function promptDownload(kind, expectedCount, startStr, endStr, rec, opts = {}) {
@@ -2206,10 +2217,16 @@ async function loopDownload(opts = {}) {
     inHistory && historyCap ? historyCap : L.sessionCap(inHistory);
   // GG 列表加载速度（毫秒/行）：一批的行数控制在约 LOAD_TARGET_MS 能加载完
   let msPerRow = await loadLoadSpeed(pageType);
-  const rowsForLoad = () => msPerRow
-    ? Math.max(L.AUTO.LOAD_MIN_ROWS, Math.min(L.AUTO.BATCH_TARGET_ROWS,
-        Math.floor((L.AUTO.LOAD_TARGET_MS - L.AUTO.LOAD_OVERHEAD_MS) / msPerRow)))
-    : L.AUTO.BATCH_TARGET_ROWS;
+  // 一批至少装满一趟概要（500 行）：按速度缩批只为控制加载时长，不能因此多点下载
+  const oneRound = () => learnedCap ? Math.min(learnedCap, L.sessionCap(false)) : L.sessionCap(false);
+  // 按速度算出的行数再取成整趟（500 的倍数）：560 行会分成两趟、每趟 280 条，反而多点一次
+  const rowsForLoad = () => {
+    if (!msPerRow) return L.AUTO.BATCH_TARGET_ROWS;
+    const raw = Math.floor((L.AUTO.LOAD_TARGET_MS - L.AUTO.LOAD_OVERHEAD_MS) / msPerRow);
+    if (raw >= L.AUTO.BATCH_TARGET_ROWS) return L.AUTO.BATCH_TARGET_ROWS;
+    const round = Math.max(L.AUTO.LOAD_MIN_ROWS, oneRound());
+    return Math.max(1, Math.floor(raw / round)) * round;
+  };
   if (msPerRow) log(`按上次测到的加载速度（约 ${msPerRow} 毫秒/行），每批控制在约 ${rowsForLoad()} 行`, "clicks");
   // 上次量出来的密度：第一批直接按它把这一批装到接近上限
   const savedDensity = repair ? null : await loadDensity(pageType);
@@ -2709,7 +2726,11 @@ async function loopDownload(opts = {}) {
         const lo = roundStart.getTime() - L.MS_PER_DAY;
         const hi = roundEnd.getTime() + 2 * L.MS_PER_DAY;
         const outside = dates.filter((d) => d.getTime() < lo || d.getTime() >= hi);
-        if (dates.length && outside.length) {
+        // 少数几行在范围外（多日赛、时区）不算：超过一半才说明列表和筛选对不上
+        if (outside.length && outside.length * 2 < dates.length) {
+          log(`有 ${outside.length}/${dates.length} 行的日期略超出本批范围（多日赛或时区），照常下载`, "loopDownload");
+        }
+        if (dates.length && outside.length * 2 >= dates.length) {
           const ms = dates.map((d) => d.getTime());
           const minD = new Date(Math.min(...ms)), maxD = new Date(Math.max(...ms));
           dateMismatches++;

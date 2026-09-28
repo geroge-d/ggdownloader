@@ -298,6 +298,11 @@
     #rtgto-result { font-size: 12px; line-height: 1.6; color: var(--text-2); margin-top: 4px; word-break: break-word; }
     #rtgto-result .bad { color: var(--err); }
     #rtgto-result .ok { color: var(--ok); }
+    #rtgto-activity { font-size: 12px; line-height: 1.6; color: var(--text-2); margin-top: 4px; }
+    #rtgto-activity:empty { display: none; }
+    #rtgto-activity div::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px;
+      border-radius: 50%; background: var(--warn); vertical-align: middle; animation: gg-pulse 1.2s ease-in-out infinite; }
+    @keyframes gg-pulse { 0%, 100% { opacity: .35 } 50% { opacity: 1 } }
     .ledger-row .vf { color: var(--text-3); }
     .ledger-row .vf .bad { color: var(--err); }
     .ledger-row .vf .ok { color: var(--ok); }
@@ -511,6 +516,8 @@
         <span id="rtgto-status" class="rtgto-status off"></span>
       </div>
       <div id="rtgto-result"></div>
+      <!-- 正在进行的：等 GG 准备文件 / 浏览器下载中 / 实时GTO 解析中 / 等待核对，实时刷新 -->
+      <div id="rtgto-activity"></div>
       <div id="repair-box">
         <div id="repair-info"></div>
       </div>
