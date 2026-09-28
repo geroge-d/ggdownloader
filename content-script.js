@@ -794,9 +794,10 @@ async function runAutomation() {
     // 同步只保证"点了下载"。下没下到要等实时GTO 核对，缺的自动补，确认齐了才算完成。
     currentStatus.isRunning = true;
     // 补下载会把 currentStatus.syncTo 改成补的那一段，这次同步的终点先记下
-    const syncTo = currentStatus.syncTo;
+    const syncTo = currentStatus.syncTo, syncFrom = currentStatus.syncFrom;
     const done = await completenessPhase(currentPageType(), syncTo);
     currentStatus.syncTo = syncTo;
+    currentStatus.syncFrom = syncFrom;
     if (stopFlag) {
       logWarning("自动化流程被手动停止", "runAutomation");
       return;
