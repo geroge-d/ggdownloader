@@ -101,6 +101,9 @@ function renderActivity() {
   if (a && a.kind === 'dlwait' && now - (a.at || 0) < 5000) {
     lines.push(t('activity_dlwait', { label: a.label || '', secs: a.secs || 0 }));
   }
+  if (a && a.kind === 'pending' && now - (a.at || 0) < 10000) {
+    lines.push(t('activity_pending', { n: a.n || 1, secs: a.secs || 0 }));
+  }
   const running = (lastDownloads || []).filter((d) => d && d.state === 'in_progress');
   if (running.length) {
     const mb = (running.reduce((n, d) => n + (d.bytes || 0), 0) / 1048576).toFixed(1);

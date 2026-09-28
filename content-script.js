@@ -727,6 +727,8 @@ let loopAbortMessage = null;
 async function runAutomation() {
   runStats = newRunStats(currentPageType());
   loopAbortMessage = null;
+  pendingStarts.length = 0;   // 上一次同步遗留的等待记录不算
+  if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
   try {
     logSuccess("开始自动化流程", "runAutomation");
     await loopDownload();
@@ -1357,9 +1359,10 @@ async function selectAllAndVerify(rowCount, maxAttempts = 4) {
  * GG 的下载要用户手势才触发，所以这一步没法自动化；能做的是确保按钮真的
  * 可点、提示清楚、并且用户没点时如实记为"本批未完成"而不是悄悄跳过。
  */
-// 点了下载之后，GG 要先在服务器上打包文件，浏览器才开始下载。GG 同一个用户的请求是排队处理的：
-// 文件没打包好之前去加载下一段列表，列表请求会一直排在后面（线上一个 450 条的概要包打包了 7 分钟，
-// 期间两次加载列表都等满 3 分钟超时）。所以每次点完下载，等浏览器真正开始下载再做下一步。
+// 点了下载之后，GG 要先在服务器上打包文件，浏览器才开始下载。GG 同一个用户的请求（看起来）是排队处理的：
+// 文件没打包好之前去加载下一段列表，列表请求会排在后面（线上一个 450 条的概要包打包了 7 分钟）。
+// 扩展不等下载开始（用户要求并行），而是在后台对上号（trackDownloadStart）；列表加载真排在后面时，
+// waitForTableSettled 把排队时间不算进超时。一个下载最多等这么久还没开始，就交给同步结束后的核对。
 const DOWNLOAD_START_WAIT_MS = 12 * 60 * 1000;   // 后台只认最后一次点击后 15 分钟内开始的下载
 
 function ggDownloadIds() {
@@ -1369,35 +1372,72 @@ function ggDownloadIds() {
   }));
 }
 
-async function waitForDownloadStart(clickedAtMs, idsBefore, label) {
-  const t0 = Date.now();
-  while (!stopFlag) {
-    await waitIfPaused();
-    const list = await ggDownloadIds();
-    const hit = list.find((d) => d && !idsBefore.has(d.id) && (d.startTime || 0) >= clickedAtMs - 3000);
-    const secs = Math.round((Date.now() - clickedAtMs) / 1000);
-    if (hit) {
-      log(`GG 用了 ${secs} 秒准备好${label}文件，浏览器已开始下载`, "dlwait");
-      setActivity(null);
-      return true;
-    }
-    if (Date.now() - t0 > DOWNLOAD_START_WAIT_MS) {
-      logWarning(`等了 ${secs} 秒${label}还没开始下载，先继续（实时GTO 核对时会发现，缺了会自动补）`, "dlwait");
-      setActivity(null);
-      return false;
-    }
-    // 侧边栏"下载核对"卡片据此实时显示在等什么
-    currentStatus.activity = { kind: 'dlwait', label, secs, at: Date.now() };
-    updateStatus("info", `等待 GG 准备${label}文件（已等 ${secs} 秒）…下载开始后再继续，免得下一步排在它后面`);
-    await wait(1000);
-  }
-  setActivity(null);
-  return false;
-}
-
 function setActivity(a) {
   currentStatus.activity = a;
   chrome.storage.local.set({ ggpokerStatus: currentStatus });
+}
+
+// —— 点了下载不等：GG 在后台打包，浏览器开始下载时在这里对上号 ——
+// 用户要求并行：点完就接着勾下一趟、加载下一段。GG 同一用户的请求排队处理，
+// 列表加载真排在打包后面时由 waitForTableSettled 多等（不算超时）；
+// 真没下到的，同步结束后的核对会发现并自动补。
+const pendingStarts = [];   // [{ clickedAtMs, idsBefore, label }]，按点击先后
+let pendingTimer = null;
+
+function trackDownloadStart(clickedAtMs, idsBefore, label) {
+  pendingStarts.push({ clickedAtMs, idsBefore, label });
+  publishPending();
+  schedulePendingCheck();
+}
+
+// 用 setTimeout 自己循环（不用 setInterval）：有等着的才继续查，查完就停
+function schedulePendingCheck() {
+  if (pendingTimer || !pendingStarts.length) return;
+  pendingTimer = setTimeout(async () => {
+    pendingTimer = null;
+    try { await checkPendingStarts(); } finally { schedulePendingCheck(); }
+  }, 1500);
+}
+
+function publishPending() {
+  if (!pendingStarts.length) {
+    if (currentStatus.activity && currentStatus.activity.kind === 'pending') setActivity(null);
+    return;
+  }
+  const oldest = pendingStarts[0];
+  currentStatus.activity = {
+    kind: 'pending', n: pendingStarts.length, label: oldest.label,
+    secs: Math.round((Date.now() - oldest.clickedAtMs) / 1000), at: Date.now(),
+  };
+  chrome.storage.local.set({ ggpokerStatus: currentStatus });
+}
+
+async function checkPendingStarts() {
+  if (!pendingStarts.length) {
+    publishPending();
+    return;
+  }
+  const list = await ggDownloadIds();
+  // 下载按点击先后开始（GG 排队打包）：新出现的下载依次对给最早还在等的点击
+  const claimed = new Set();
+  for (const p of pendingStarts.slice()) {
+    const hit = list.find((d) => d && !p.idsBefore.has(d.id) && !claimed.has(d.id) &&
+      (d.startTime || 0) >= p.clickedAtMs - 3000);
+    const secs = Math.round((Date.now() - p.clickedAtMs) / 1000);
+    if (hit) {
+      claimed.add(hit.id);
+      pendingStarts.splice(pendingStarts.indexOf(p), 1);
+      // 之后的点击都不能再认这个下载
+      for (const q of pendingStarts) q.idsBefore.add(hit.id);
+      log(`GG 用了 ${secs} 秒准备好${p.label}文件，浏览器已开始下载`, "dlwait");
+    } else if (Date.now() - p.clickedAtMs > DOWNLOAD_START_WAIT_MS) {
+      pendingStarts.splice(pendingStarts.indexOf(p), 1);
+      logWarning(`${p.label}点了 ${secs} 秒还没开始下载（同步结束后的核对会发现，缺了会自动补）`, "dlwait");
+    } else {
+      break;   // 前面的还没开始，后面的更不会先开始
+    }
+  }
+  publishPending();
 }
 
 async function promptDownload(kind, expectedCount, startStr, endStr, rec, opts = {}) {
@@ -1446,7 +1486,8 @@ async function promptDownload(kind, expectedCount, startStr, endStr, rec, opts =
           });
         }
         if (!dialogHandled) return false;   // 只有用户停止才会 false
-        await waitForDownloadStart(clickedAtMs, idsBefore, label);
+        // 不等下载开始：记下来在后台对上号，接着做下一步
+        trackDownloadStart(clickedAtMs, idsBefore, label);
         if (stopFlag) return false;
         logSuccess(`下载${label}已完成`, 'promptDownload');
         return true;
@@ -1633,11 +1674,24 @@ async function waitForTableSettled(fpBefore, netBefore, timeout = 180000) {
   }
 
   // 2) 等在途请求归零。这一步不设短超时 —— 网慢就是多等，绝不能提前下结论。
-  const idle = await D.waitFor(
-    () => D.netState().inflight === 0,
-    Math.max(1000, deadline - Date.now()),
-    150
-  );
+  //    GG 还在打包我们点过的下载文件时，列表请求排在它后面：这段排队时间不算进超时
+  //    （最长等到 12 分钟），也记下来（queuedMs），估加载速度、判断"空结果可疑"时扣掉。
+  const waitStart = Date.now();
+  let queuedMs = 0, lastTick = Date.now(), queueNoted = false, idle = false;
+  while (true) {
+    if (D.netState().inflight === 0) { idle = true; break; }
+    const now = Date.now();
+    if (pendingStarts.length) {
+      queuedMs += now - lastTick;
+      if (!queueNoted && now - waitStart > 30000) {
+        queueNoted = true;
+        log(`列表请求排在 GG 打包的 ${pendingStarts.length} 个下载文件后面，继续等`, "settle");
+      }
+    }
+    lastTick = now;
+    if (now > Math.min(waitStart + DOWNLOAD_START_WAIT_MS, deadline + queuedMs)) break;
+    await new Promise((r) => setTimeout(r, 150));
+  }
   if (!idle) {
     logWarning("等待网络请求结束超时", "settle");
   }
@@ -1650,14 +1704,19 @@ async function waitForTableSettled(fpBefore, netBefore, timeout = 180000) {
   // 这次加载期间有没有请求失败（网络错误、被中止、HTTP 4xx/5xx）
   const failedBefore = netBefore && netBefore.available ? (netBefore.failed || 0) : D.netState().failed;
   const failed = D.netState().failed > failedBefore;
+  const tookMs = Date.now() - waitStart;
   log(
     `加载完成：新请求=${fired ? '有' : '无'}，网络空闲=${idle}，DOM=${quiet}，${rows} 行` +
-    (failed ? '，期间有请求失败' : ''),
+    (failed ? '，期间有请求失败' : '') +
+    // 加载久的时候记下当时的状况，用来判断是不是排在 GG 打包下载文件后面
+    (tookMs > 30000 ? `（用了 ${Math.round(tookMs / 1000)} 秒，其中排队 ${Math.round(queuedMs / 1000)} 秒；` +
+      `在途请求 ${D.netState().inflight}，GG 打包中 ${pendingStarts.length}）` : ''),
     "settle"
   );
   return {
     changed: fp !== fpBefore,
     stable: !!idle,
+    queuedMs,
     failed,
     rows,
     fingerprint: fp,
@@ -2637,8 +2696,9 @@ async function loopDownload(opts = {}) {
             Math.max(spanCeiling, batchDays * 2), Math.floor(slowSpan * 0.6)));
           log(`列表加载用了 ${secs} 秒（${batchDays} 天，${settle.rows} 行）`, "loopDownload");
           // 按这次的"每行多少毫秒"更新加载速度，下一批的行数据此控制在约 1 分钟能加载完
-          if (settle.rows >= L.AUTO.LOAD_SAMPLE_MIN_ROWS) {
-            const loadMs = Date.now() - showClickedAt;
+          // 排过队的加载不拿来估速度（等的是 GG 打包文件，不是列表本身）
+          if (settle.rows >= L.AUTO.LOAD_SAMPLE_MIN_ROWS && !(settle.queuedMs > 0)) {
+            const loadMs = Date.now() - showClickedAt - (settle.queuedMs || 0);
             const per = Math.max(1, loadMs - L.AUTO.LOAD_OVERHEAD_MS) / settle.rows;
             const before = rowsForLoad();
             msPerRow = msPerRow ? msPerRow * 0.5 + per * 0.5 : per;
@@ -2801,11 +2861,11 @@ async function loopDownload(opts = {}) {
           continue;   // 不 advance、不 commit，原样重来
         } else if (settle.viaNetwork && (batchDays > 1 || !confirmingEmpty) &&
                    (settle.failed || (!confirmingEmpty && batchDays > trustedEmptySpan &&
-                                      Date.now() - showClickedAt > EMPTY_TRUST_MS))) {
+                                      Date.now() - showClickedAt - (settle.queuedMs || 0) > EMPTY_TRUST_MS))) {
           // 空结果可疑：请求失败了，或者等了很久才空。只重查前一半，确认了再推进
           const half = Math.max(L.AUTO.MIN_SPAN, Math.floor(batchDays / 2));
           logWarning(
-            `${startStr} ~ ${endStr} 显示 0 行，但${settle.failed ? '期间有请求失败' : `加载用了 ${Math.round((Date.now() - showClickedAt) / 1000)} 秒`}，` +
+            `${startStr} ~ ${endStr} 显示 0 行，但${settle.failed ? '期间有请求失败' : `加载用了 ${Math.round((Date.now() - showClickedAt - (settle.queuedMs || 0)) / 1000)} 秒`}，` +
             `不能直接当成没数据；先重查前 ${half} 天确认`,
             "loopDownload"
           );

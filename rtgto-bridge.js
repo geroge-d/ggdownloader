@@ -162,6 +162,14 @@
   // 点了下载之后 GG 要先在服务器上打包，浏览器过一会儿才开始下载。
   // 这段时间里还没对上下载的点击先不核对（否则会被判成"没出现下载"去白补一次）。
   const START_GRACE_MS = 3 * 60 * 1000;
+  // 连着点了好几个下载时 GG 排队打包，后面那些可能点了 3 分钟以上才开始下载：
+  // 只要最近 3 分钟内还有 GG 下载开始（队列在动），就继续等，最长 12 分钟
+  const QUEUE_GRACE_MS = 12 * 60 * 1000;
+  function inGrace(Ledger, e, downloads, now) {
+    if (now - Ledger.graceStart(e) < START_GRACE_MS) return true;
+    const moving = (downloads || []).some((d) => d && now - (d.startTime || 0) < START_GRACE_MS);
+    return moving && now - Ledger.graceStart(e) < QUEUE_GRACE_MS;
+  }
   // 同一次点击因"文件类型不符"最多解开重配几次
   const MAX_UNPIN = 3;
 
@@ -238,7 +246,7 @@
       e.status === "clicked" && e.clickedAtMs && (!e.verify || e.verify.status === "downloading" || recheck(e)) &&
       // 下载还没开始、但刚点不久：再等等。不过点击之后已经有下完的文件时照样发——
       // 实时GTO 按内容配对，这次点击的文件可能被按时间配给了别的点击
-      !(!e.download && now - Ledger.graceStart(e) < START_GRACE_MS && !hasFileAfter(e)));
+      !(!e.download && inGrace(Ledger, e, downloads, now) && !hasFileAfter(e)));
     if (o.onlyFinished) toSend = toSend.filter((e) => e.download && e.download.state !== "in_progress");
     if (!toSend.length) return { status: "nothing" };
 
@@ -371,7 +379,8 @@
     const attached = Ledger.attachDownloads(list, Array.isArray(dl[DOWNLOADS_KEY]) ? dl[DOWNLOADS_KEY] : []);
     const now = Date.now();
     const mine = attached.filter((e) => e.status === "clicked" && e.clickedAtMs);
-    const notStarted = mine.filter((e) => !e.verify && !e.download && now - Ledger.graceStart(e) < START_GRACE_MS);
+    const dls = Array.isArray(dl[DOWNLOADS_KEY]) ? dl[DOWNLOADS_KEY] : [];
+    const notStarted = mine.filter((e) => !e.verify && !e.download && inGrace(Ledger, e, dls, now));
     const downloading = mine.filter((e) => e.verify
       ? e.verify.status === "downloading"
       : e.download && e.download.state === "in_progress");
