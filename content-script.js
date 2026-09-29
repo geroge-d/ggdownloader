@@ -779,6 +779,7 @@ async function runAutomation() {
   runStats = newRunStats(currentPageType());
   loopAbortMessage = null;
   pendingStarts.length = 0;   // 上一次同步遗留的等待记录不算
+  await refreshAutoClick();
   if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
   try {
     logSuccess("开始自动化流程", "runAutomation");
@@ -1604,7 +1605,7 @@ async function promptDownload(kind, expectedCount, startStr, endStr, rec, opts =
         const clickedAtMs = Date.now();
         sendToBackground({ action: 'ggDownloadClick' });
         statClick(kind, count);
-        log(`已点击下载${label}`, 'promptDownload');
+        log(`已${clicked === 'auto' ? '自动' : ''}点击下载${label}`, 'promptDownload');
         // 点了按钮不等于下载完成：GG 可能紧接着弹一个确认/准备中的框。
         // 那个框没处理完就推进时间，这一批其实根本没下到。
         const dialogHandled = await waitForDownloadSettled(label);
@@ -1616,6 +1617,7 @@ async function promptDownload(kind, expectedCount, startStr, endStr, rec, opts =
             settled: !!dialogHandled,
             clickedAtMs,
             clickedAt: GG_LEDGER ? GG_LEDGER.localIso(clickedAtMs) : null,
+            autoClick: clicked === 'auto',
           });
         }
         if (!dialogHandled) return false;   // 只有用户停止才会 false
@@ -1687,6 +1689,39 @@ function recordLedger(rec, kind, status, extra) {
   GG_LEDGER.add(entry).catch((e) => console.error('[GGPoker助手] 写下载记录失败', e));
 }
 
+// —— 自动点击下载（侧边栏开关，默认关闭，用户决定）——
+// 打开后扩展自己点 GG 的下载按钮，后面的流程（弹窗、对上下载、核对、补下载）不变。
+// 点了之后几秒内 GG 毫无反应（没发请求、没弹窗、没有新下载），说明 GG 不认程序点击，
+// 这次同步改回等用户手动点，不会一直空点。
+const AUTO_CLICK_KEY = 'ggAutoClickDownload';
+let autoClickOn = false;
+let autoClickOffThisRun = false;
+
+async function refreshAutoClick() {
+  const r = await storageGet([AUTO_CLICK_KEY]);
+  autoClickOn = r[AUTO_CLICK_KEY] === true;
+  autoClickOffThisRun = false;
+  if (autoClickOn) log('已打开"自动点击下载"：下载按钮由插件自己点', 'promptDownload');
+}
+
+async function clickEffectSnapshot() {
+  return { net: D.netState(), ids: new Set((await ggDownloadIds()).map((d) => d && d.id)) };
+}
+
+// 点了之后 GG 有没有反应：发了请求、弹了框 / 转圈、或者浏览器开始了新下载
+async function clickHadEffect(before) {
+  // 没有网络探针时只能等弹窗或下载出现，GG 打包要几十秒，多等一会儿
+  const until = Date.now() + (before.net.available ? 8000 : 90000);
+  while (Date.now() < until) {
+    if (stopFlag) return true;
+    if (before.net.available && D.netState().seen > before.net.seen) return true;
+    if (D.findOpenDialog() || D.findBusySpinner() || D.findLimitDialog()) return true;
+    if ((await ggDownloadIds()).some((d) => d && !before.ids.has(d.id))) return true;
+    await wait(400);
+  }
+  return false;
+}
+
 /**
  * 一直等到用户点下载按钮为止 —— 不设超时。
  *
@@ -1704,7 +1739,8 @@ function waitForUserClick(finder, kind, label, startStr, endStr, count) {
     let missingSince = 0;
     const waitingSince = Date.now();
 
-    const onClick = () => finish(true);
+    let autoClicking = false;
+    const onClick = () => { if (!autoClicking) finish(true); };
 
     function attach(btn) {
       if (watched === btn) return;
@@ -1755,7 +1791,31 @@ function waitForUserClick(finder, kind, label, startStr, endStr, count) {
 
     const first = finder();
     if (first) attach(first);
-    updateStatus('info', `请点击「下载${label}」：${startStr} ~ ${endStr}（${count} 条）`);
+    const auto = autoClickOn && !autoClickOffThisRun;
+    updateStatus('info', `${auto ? '即将自动点击' : '请点击'}「下载${label}」：${startStr} ~ ${endStr}（${count} 条）`);
+    if (auto) autoClickSoon();
+
+    // 像人一样停一两秒再点；点完确认 GG 有反应才算点了（返回 'auto'）
+    function autoClickSoon() {
+      setTimeout(async () => {
+        if (done || stopFlag || autoClickOffThisRun) return;
+        if (pauseFlag) return autoClickSoon();
+        const btn = finder();
+        if (!btn || !D.isAttached(btn) || !D.isDownloadReady(btn)) return autoClickSoon();
+        if (btn !== watched) attach(btn);
+        const before = await clickEffectSnapshot();
+        if (done) return;
+        autoClicking = true;
+        try { btn.click(); } finally { autoClicking = false; }
+        const ok = await clickHadEffect(before);
+        if (done) return;   // 这期间用户自己点了
+        if (ok) return finish('auto');
+        autoClickOffThisRun = true;
+        highlightAndPromptDownloadButton(kind);   // 自动点那一下把高亮清掉了，重新亮起来等人点
+        logWarning(`自动点击「下载${label}」后 GG 没有反应（可能只认真人点击），这次同步改回等你手动点`, 'promptDownload');
+        updateStatus('warning', `自动点击没反应，请手动点击「下载${label}」：${startStr} ~ ${endStr}（${count} 条）`);
+      }, randomBetween(1000, 3000));
+    }
   });
 }
 
@@ -3346,6 +3406,7 @@ async function repairSegments(segments) {
 /** 旧入口（侧边栏的 repair 消息）：补完直接收尾。现在补下载都在同步收尾阶段自动进行。 */
 async function runRepair(segments) {
   try {
+    await refreshAutoClick();
     const r = await repairSegments(segments);
     if (stopFlag) {
       logWarning(`补下载已停止（完成 ${r.okCount}/${segments.length} 段）`, "repair");
