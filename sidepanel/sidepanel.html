@@ -282,9 +282,6 @@
     .ledger-actions button.primary { background: var(--accent-2); border-color: var(--accent-2); color: #fff; font-weight: 600; }
     .ledger-actions button.primary:hover:not(:disabled) { background: #1d4ed8; }
     .ledger-actions button.primary:disabled { background: #2a3345; border-color: var(--border); color: var(--text-3); }
-    #auto-click-row { margin: 10px 0 0; }
-    #auto-click-hint { display: none; margin-top: 4px; font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
-    #auto-click-hint.on { display: block; }
     #rtgto-sync-hint { display: none; margin-top: 10px; padding: 7px 9px; border-radius: 7px; font-size: 12px; line-height: 1.6; }
     #rtgto-sync-hint.on { display: block; background: #1e3a2f66; border: 1px solid #2f5a45; color: var(--ok); }
     #rtgto-sync-hint.off { display: block; background: #3a2f1e55; border: 1px solid #5c4a24; color: var(--warn); }
@@ -506,12 +503,6 @@
         <button id="start-stop-btn" data-i18n="sync_now">开始同步</button>
         <button id="pause-resume-btn" disabled data-i18n="pause">暂停</button>
       </div>
-      <!-- 自动点击下载：默认关闭（用户决定）；打开后扩展自己点 GG 的下载按钮 -->
-      <label class="check-row" id="auto-click-row">
-        <input type="checkbox" id="auto-click">
-        <span data-i18n="auto_click">自动点击下载（不用守着点）</span>
-      </label>
-      <div id="auto-click-hint" data-i18n="auto_click_hint">第一次 Chrome 会问“此网站想要下载多个文件”，请点“允许”。GG 不响应自动点击时会改回等你手动点。</div>
       <!-- 开始同步 / 补下载时检测实时GTO是否打开，告诉用户去哪里看核对状态 -->
       <div id="rtgto-sync-hint"></div>
       <button id="clear-sync-btn" data-i18n="clear_sync">清除同步记录（下次从头同步）</button>

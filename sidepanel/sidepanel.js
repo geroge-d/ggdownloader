@@ -28,23 +28,6 @@ const mainPanel = document.getElementById('main-panel');
 // 退出按钮在顶栏右侧，和账号区分开，要单独控制显示
 const rememberPwd = document.getElementById('remember-pwd');
 const logoutBtn = document.getElementById('logout-btn');
-
-// —— 自动点击下载（默认关闭）：打开后页面上的扩展自己点 GG 的下载按钮 ——
-const AUTO_CLICK_KEY = 'ggAutoClickDownload';
-const autoClickBox = document.getElementById('auto-click');
-const autoClickHint = document.getElementById('auto-click-hint');
-function renderAutoClick(on) {
-  if (autoClickBox) autoClickBox.checked = !!on;
-  if (autoClickHint) autoClickHint.classList.toggle('on', !!on);
-}
-if (autoClickBox) {
-  chrome.storage.local.get([AUTO_CLICK_KEY], (r) => renderAutoClick(r && r[AUTO_CLICK_KEY] === true));
-  autoClickBox.addEventListener('change', () => {
-    const on = autoClickBox.checked;
-    chrome.storage.local.set({ [AUTO_CLICK_KEY]: on });
-    renderAutoClick(on);
-  });
-}
 const langSwitch = document.getElementById('lang-switch');
 const langZh = document.getElementById('lang-zh');
 const langEn = document.getElementById('lang-en');
