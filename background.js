@@ -51,7 +51,7 @@ const I18N = {
     warning_manual: "请手动点击此按钮下载",
     side_panel_may_already_be_closed: "Side panel 可能已经关闭",
     error_updating_side_panel_availability: "更新 Side Panel 可用性时出错",
-    chrome_version_not_supported: "Chrome 版本 {0} 不受支持，请升级到114或更高版本。",
+    chrome_version_not_supported: "浏览器内核版本 {0} 不受支持，请把 Chrome 或 Edge 升级到 116 或更高版本。",
     ggpoker_record_download_assistant: "GGPoker记录下载助手",
     this_page_does_not_support_ggpoker_record_download_assistant_please_use_ggpoker_website: "此页面不支持 GGPoker记录下载助手，请在 GGPoker 网站上使用。",
     error_opening_side_panel: "打开 Side Panel 时发生错误",
@@ -108,7 +108,7 @@ const I18N = {
     warning_manual: "Please click this button to download manually",
     side_panel_may_already_be_closed: "Side panel may already be closed",
     error_updating_side_panel_availability: "Error updating side panel availability",
-    chrome_version_not_supported: "Chrome version {0} is not supported. Please upgrade to 114 or higher.",
+    chrome_version_not_supported: "Browser (Chromium) version {0} is not supported. Please upgrade Chrome or Edge to 116 or higher.",
     ggpoker_record_download_assistant: "GGPoker Record Download Assistant",
     this_page_does_not_support_ggpoker_record_download_assistant_please_use_ggpoker_website: "This page does not support GGPoker Record Download Assistant. Please use it on the GGPoker website.",
     error_opening_side_panel: "Error opening side panel",
@@ -155,7 +155,7 @@ async function updateSidePanelAvailability(tab) {
   }
 }
 
-// 检查 Chrome 版本
+// 检查 Chromium 内核版本（Chrome 和 Edge 的 UA 里都有 Chrome/<版本>，两者版本号一致）
 function getChromeVersion() {
   const match = navigator.userAgent.match(/Chrome\/(\d+)/);
   return match ? parseInt(match[1]) : 0;
@@ -164,7 +164,8 @@ function getChromeVersion() {
 // 检查是否支持 Side Panel API
 function isSidePanelSupported() {
   const version = getChromeVersion();
-  if (version < 114) {
+  // sidePanel.open 要 116+
+  if (version < 116) {
     console.error(t('chrome_version_not_supported'), version);
     return false;
   }
@@ -246,7 +247,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 // ---------------------------------------------------------------- 调试日志
 //
-// service worker 的 console 在 chrome://extensions -> 本扩展 -> "检查视图 Service Worker"
+// service worker 的 console 在 chrome://extensions（Edge 是 edge://extensions）-> 本扩展 -> "检查视图 Service Worker"
 // 里看。MV3 的 worker 会被挂起，console 历史会丢，所以同时写一份环形缓冲到
 // chrome.storage.local，侧边栏/控制台可以用 { action: 'getLogs' } 取回来。
 

@@ -1,6 +1,6 @@
 # GGPoker记录下载助手
 
-一个帮助 GGPoker 用户下载游戏记录和历史手牌的 Chrome 扩展。
+一个帮助 GGPoker 用户下载游戏记录和历史手牌的浏览器扩展，支持 Chrome 和 Microsoft Edge。
 
 ## 功能特点
 
@@ -30,14 +30,14 @@
   - 绝不上传服务器
   - 支持清除本地缓存
 - **兼容性**：
-  - 仅支持 Chrome 114+
+  - 支持 Chrome 116+ 和 Edge 116+（同一个扩展包，无需单独打包）
   - 仅在 GGPoker 官方网站可用
   - 采用 Side Panel 现代界面
   - 支持响应式布局
 
 ## 系统要求
 
-- Chrome 浏览器 114 或更高版本
+- Chrome 或 Microsoft Edge 116 或更高版本
 - 仅支持 GGPoker 官方网站：
   - https://my.pokercraft.com/*
   - https://*.ggpoker.com/*
@@ -50,12 +50,20 @@
    - 搜索 "GGPoker记录下载助手"
    - 点击"添加到 Chrome"
 
-2. 手动安装（开发版）
+2. 手动安装（开发版，Chrome）
    - 下载本项目的 ZIP 文件并解压
    - 打开 Chrome 浏览器，进入扩展程序页面 (chrome://extensions/)
    - 开启右上角的"开发者模式"
    - 点击"加载已解压的扩展程序"
    - 选择解压后的文件夹
+
+3. 手动安装（开发版，Edge）
+   - 下载本项目的 ZIP 文件并解压
+   - 打开 Edge 浏览器，进入扩展页面 (edge://extensions/)
+   - 打开左侧的"开发人员模式"
+   - 点击"加载解压缩的扩展"
+   - 选择解压后的文件夹
+   - 在 GGPoker 网站上点工具栏的扩展图标（可在"扩展"菜单里把它固定到工具栏），侧边栏会在右侧打开
 
 ## 使用说明
 
@@ -161,7 +169,7 @@
 
 ## 注意事项
 
-- 需要 Chrome 114 或更高版本才能使用 Side Panel 功能
+- 需要 Chrome 或 Edge 116 或更高版本才能使用侧边栏（Side Panel）功能
 - 仅支持 GGPoker 官方网站，其他网站无法使用
 - 建议每次下载的日期范围不要太大，以免影响性能
 - 下载过程中请保持网络连接稳定
@@ -182,7 +190,7 @@
 
 1. 为什么扩展图标点击后没有反应？
    - 请确认您正在访问 GGPoker 官方网站
-   - 检查 Chrome 浏览器版本是否满足要求
+   - 检查 Chrome / Edge 浏览器版本是否满足要求（116+）
    - 确认扩展是否已正确安装
 
 2. 下载过程中断怎么办？
@@ -231,7 +239,7 @@
 ```shell
 python build.py
 ```
-不要用 `Compress-Archive`：它写出的 zip 路径分隔符是反斜杠，Chrome 加载会失败。
+不要用 `Compress-Archive`：它写出的 zip 路径分隔符是反斜杠，Chrome / Edge 加载会失败。
 
 实时GTO 内置了一份扩展（「GG数据导入」→「安装GG数据下载扩展」解压到 `文档\RealtimeGTO\GGDownloadExtension`）。
 更新内置版本时加 `--copy-to`，把包复制成实时GTO 仓库里的 `assets/gg_extension/gg-download-extension.zip`：

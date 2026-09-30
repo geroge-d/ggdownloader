@@ -1021,6 +1021,7 @@ async function renderUpdateBanner() {
     escapeHtml(t('ext_update_desc', {
       mine: fmtBuild(old.mine), latest: fmtBuild(old.latest),
       mineVersion: old.mineVersion || '-', latestVersion: old.latestVersion || '-',
+      extPage: /Edg\//.test(navigator.userAgent) ? 'edge://extensions' : 'chrome://extensions',
     }));
 }
 

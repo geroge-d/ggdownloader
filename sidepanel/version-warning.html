@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <title>Chrome 版本提示</title>
+  <title>浏览器版本提示</title>
   <style>
     body {
       margin: 0;
@@ -66,17 +66,13 @@
 <body>
   <div class="container">
     <img src="../icons/icon128.png" alt="GGPoker" class="icon">
-    <h1>需要更新 Chrome 浏览器</h1>
-    <p>GGPoker记录下载助手需要 Chrome 114 或更高版本才能使用 Side Panel 功能。</p>
+    <h1>需要更新<span class="browser-name"> Chrome </span>浏览器</h1>
+    <p>GGPoker记录下载助手需要 Chrome 或 Edge 116 及以上版本才能使用侧边栏功能。</p>
     <div class="version">当前版本：<span id="current-version">检测中...</span></div>
-    <p>请更新您的 Chrome 浏览器以获得最佳体验。</p>
-    <a href="https://www.google.com/chrome/" target="_blank" class="download-btn">下载最新版 Chrome</a>
+    <p>请更新您的<span class="browser-name"> Chrome </span>浏览器以获得最佳体验。</p>
+    <a id="download-link" href="https://www.google.com/chrome/" target="_blank" class="download-btn">下载最新版<span class="browser-name"> Chrome </span></a>
   </div>
-  <script>
-    // 显示当前 Chrome 版本
-    const match = navigator.userAgent.match(/Chrome\/(\d+)/);
-    const version = match ? match[1] : '未知';
-    document.getElementById('current-version').textContent = `Chrome ${version}`;
-  </script>
+  <!-- MV3 扩展页面不允许内联脚本 -->
+  <script src="version-warning.js"></script>
 </body>
-</html> 
+</html>
