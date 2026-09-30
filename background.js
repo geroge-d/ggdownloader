@@ -161,21 +161,26 @@ function getChromeVersion() {
   return match ? parseInt(match[1]) : 0;
 }
 
-// 检查是否支持 Side Panel API
-function isSidePanelSupported() {
+// 检查是否支持 Side Panel API。返回 null 表示支持，否则是不支持的原因：
+// 'version' 内核版本太低；'noapi' 版本够但没有 chrome.sidePanel（第三方 Chromium 浏览器伪装成 Chrome 的 UA 时常见）
+function sidePanelUnsupportedReason() {
   const version = getChromeVersion();
   // sidePanel.open 要 116+
   if (version < 116) {
     console.error(t('chrome_version_not_supported'), version);
-    return false;
+    return 'version';
   }
-  return chrome.sidePanel !== undefined;
+  if (!chrome.sidePanel || typeof chrome.sidePanel.open !== 'function') {
+    console.error('chrome.sidePanel 不可用，UA:', navigator.userAgent);
+    return 'noapi';
+  }
+  return null;
 }
 
 // 显示版本提示
-function showVersionWarning() {
+function showVersionWarning(reason) {
   chrome.tabs.create({
-    url: 'sidepanel/version-warning.html',
+    url: 'sidepanel/version-warning.html?reason=' + reason,
     active: true
   });
 }
@@ -183,8 +188,9 @@ function showVersionWarning() {
 // 监听扩展图标点击
 chrome.action.onClicked.addListener(async (tab) => {
   try {
-    if (!isSidePanelSupported()) {
-      showVersionWarning();
+    const unsupported = sidePanelUnsupportedReason();
+    if (unsupported) {
+      showVersionWarning(unsupported);
       return;
     }
 
@@ -230,8 +236,9 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 // 初始化设置
 chrome.runtime.onInstalled.addListener(async () => {
   try {
-    if (!isSidePanelSupported()) {
-      showVersionWarning();
+    const unsupported = sidePanelUnsupportedReason();
+    if (unsupported) {
+      showVersionWarning(unsupported);
       return;
     }
 
