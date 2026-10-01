@@ -7,6 +7,8 @@
 //   GET  /gg-bridge/v1/hello   -> { app, protocol, appVersion, downloadDir, backupDir }
 //   POST /gg-bridge/v1/verify  -> 按每次"点了下载"对应的浏览器下载文件逐个核对，
 //                                 导入并备份下到的文件，返回每条的结果和漏下的区间
+//   GET  /gg-bridge/v1/sync-state  -> { states: { tournament: { lastSyncedDate, lastDataSyncAt, batches, days }, … } }
+//   POST /gg-bridge/v1/sync-state  -> { op: advance|rewind|clear, pageType, date, … } -> { state }
 //
 // 端口固定从 47651 开始试，被占用时实时GTO 会顺延到后面两个。
 
@@ -16,6 +18,8 @@
   const PORTS = [47651, 47652, 47653];
   const BASE = "/gg-bridge/v1";
   const PROTOCOL = 1;
+  // 实时GTO 从 protocol 2 起保存同步记录（/sync-state）
+  const SYNC_STATE_PROTOCOL = 2;
   // 实时GTO 导入上万手时一时顾不上回应，1.5 秒太短会被误当成"没打开"（线上同步因此半路放弃核对）
   const HELLO_TIMEOUT_MS = 5000;
   // 核对时实时GTO 要解析、导入、备份文件，文件多时要一会儿
@@ -143,7 +147,66 @@
         VERIFY_TIMEOUT_MS
       );
     },
+
+    /**
+     * 同步记录（每个分类同步到哪一天）存在实时GTO 的数据库里，扩展自己不存。
+     * op: 'get'（全部分类）/ 'advance' / 'rewind' / 'clear'，其余字段原样带给实时GTO：
+     *   { op, pageType, date, downloaded, batches, days }
+     * 连不上抛 code = 'not_connected'；实时GTO 太旧（protocol 1，还没有同步记录）抛 'rtgto_outdated'。
+     * 这两种都不能当成"没同步过"：那样会从头重下一遍。
+     */
+    async syncState(body) {
+      const h = await Bridge.hello();
+      const fail = (code, msg) => Object.assign(new Error(msg || code), { code });
+      if (!h.ok) throw fail("not_connected");
+      if (!(h.info.protocol >= SYNC_STATE_PROTOCOL)) throw fail("rtgto_outdated");
+      // 旧版扩展存在本地的同步记录先交给实时GTO；没交完就不往下读，免得被当成没同步过从头重下
+      await migrateLegacySyncState();
+      if (body.op === "get") {
+        return (await request(port, "/sync-state", { method: "GET" }, HELLO_TIMEOUT_MS)).states || {};
+      }
+      return (await request(port, "/sync-state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }, HELLO_TIMEOUT_MS)).state || null;
+    },
   };
+
+  // —— 旧版同步记录迁移（一次性）——
+  //
+  // 以前的版本把同步记录存在扩展本地（ggSyncState）。升级后第一次读写同步记录前，
+  // 把每个分类交给实时GTO：实时GTO 里已经有这个分类的记录就以它为准（不覆盖），没有才接过来。
+  // 全部交完才删本地这份；中途失败下次再来（实时GTO 那边不会重复接）。
+  const LEGACY_SYNC_KEY = "ggSyncState";
+  let legacyMigration = null;   // 进行中的迁移，几个请求同时来时共用一次
+
+  function migrateLegacySyncState() {
+    if (!legacyMigration) {
+      legacyMigration = (async () => {
+        const legacy = (await storageGet([LEGACY_SYNC_KEY]))[LEGACY_SYNC_KEY];
+        if (!legacy || typeof legacy !== "object") return;
+        for (const [pageType, s] of Object.entries(legacy)) {
+          if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s.lastSyncedDate || "")) continue;   // 没同步到任何一天
+          const res = await request(port, "/sync-state", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              op: "migrate", pageType, date: s.lastSyncedDate,
+              lastDataSyncAt: s.lastDataSyncAt || null, batches: s.batches || 0, days: s.days || 0,
+            }),
+          }, HELLO_TIMEOUT_MS);
+          console.log(`[同步记录迁移] ${pageType} ${s.lastSyncedDate}：` +
+            (res && res.migrated ? "已交给实时GTO" : "实时GTO 里已有记录，以它为准"));
+        }
+        await storageRemove([LEGACY_SYNC_KEY]);
+      })().catch((e) => {
+        legacyMigration = null;   // 下次再试
+        throw Object.assign(new Error(`本地旧同步记录迁移到实时GTO 失败：${(e && e.message) || e}`), { code: "failed" });
+      });
+    }
+    return legacyMigration;
+  }
 
   // —— 核对：侧边栏（手动 / 同步结束 / 刚连上）和后台（下载一完成就自动）共用 ——
 

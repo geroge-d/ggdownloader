@@ -149,6 +149,31 @@
 
 开始同步时侧边栏会探测实时GTO 是否打开，并提示去「GG数据导入」查看核对状态。
 
+### 同步记录存在实时GTO 里
+
+每个分类（`tournament` / `rushAndCash` / `holdem` / `plo`）同步到哪一天，保存在实时GTO 的牌局数据库里
+（`gg_sync_state` 表，实时GTO 侧 `gg_sync_state_store.dart`），扩展自己不存（`sync-state.js` 经 background 转发）：
+
+- 实时GTO 里没有这个分类的记录 = 没同步过，从 GG 保留期的最早一天开始；
+- 在实时GTO 里清空牌局时，同步记录一起清空，下次从头同步；切换数据库、备份恢复时同步记录跟着数据库走；
+- 扩展里「清除同步记录」清的是实时GTO 里这个分类的同步记录，已导入的数据不删；
+- 连不上实时GTO（或实时GTO 太旧）时不能开始同步——不知道从哪天开始，不能当成没同步过从头重下。
+
+```
+GET  /gg-bridge/v1/sync-state  -> { "states": { "plo": { "lastSyncedDate": "2026-09-30", "lastDataSyncAt": 1790000000000, "batches": 12, "days": 90 } } }
+POST /gg-bridge/v1/sync-state  { "op": "advance", "pageType": "plo", "date": "2026-10-01", "downloaded": true, "batches": 1, "days": 1 }
+                               { "op": "rewind",  "pageType": "plo", "date": "2026-09-20" }
+                               { "op": "clear",   "pageType": "plo" }
+                               { "op": "migrate", "pageType": "plo", "date": "2026-09-10", "lastDataSyncAt": …, "batches": 7, "days": 30 }
+                               -> { "state": { … } }（clear 之后为 null；migrate 另带 "migrated": true/false）
+```
+
+旧版扩展把同步记录存在本地（`ggSyncState`）。升级后第一次读写同步记录前，扩展把每个分类用 `migrate`
+交给实时GTO：实时GTO 里已有这个分类的记录就以它为准，没有才接过来。全部交完才删本地这份；
+迁移失败时读同步记录报错（不能开始同步），下次再试。
+
+`advance` 只往前推、`rewind` 只往回退（实时GTO 保证）。实时GTO 的 `hello` 里 `protocol` ≥ 2 才有这组接口。
+
 ## 技术架构
 
 - **前端界面**：

@@ -880,6 +880,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(() => sendResponse({ connected: false }));
     return true;
   }
+  // 同步记录在实时GTO 里（sync-state.js 经这里转发）：页面上的 content script 自己连不了 127.0.0.1
+  if (message.action === 'syncState') {
+    self.GG_RTGTO.syncState(message.body || {})
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((e) => {
+        const code = (e && e.code) || 'failed';
+        if (message.body && message.body.op !== 'get') {
+          bgLog('warn', 'rtgto', `同步记录 ${message.body.op} ${message.body.pageType || ''} 失败：${code} ${e && e.message}`);
+        }
+        sendResponse({ ok: false, code, error: String((e && e.message) || e) });
+      });
+    return true;
+  }
   if (message.action === 'ggDownloadClick') {
     storageSet({ [GG_LAST_CLICK_KEY]: Date.now() }).then(() => sendResponse({ ok: true }));
     return true;

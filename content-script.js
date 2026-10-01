@@ -366,6 +366,14 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         plan,
         rules: D.rulesInfo(),
       });
+    }, e => {
+      // 同步记录在实时GTO 里：连不上就不知道从哪天开始，侧边栏据此提示并禁用开始同步
+      sendResponse && sendResponse({
+        pageType: type,
+        hasSummary: L.pageConfig(type).hasSummary,
+        syncError: { code: e.code || 'failed', message: e.message },
+        rules: D.rulesInfo(),
+      });
     });
     return true;   // 异步回复
   }
@@ -392,10 +400,10 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       sendResponse && sendResponse({ error: '无法确定当前分类，没有清除任何同步记录' });
       return;
     }
-    // 连同这个分类的补下载记录一起清：补下载清单是从下载记录（没下到的日期）和
+    // 同步记录在实时GTO 里，清的是那边的记录（已导入的数据不删）。先清它，清不掉就什么也不动。
+    // 再连同这个分类的补下载记录一起清：补下载清单是从下载记录（没下到的日期）和
     // 待补清单算出来的，只清同步进度的话，从头同步完还会去补那些旧日期
-    Promise.all([
-      GG_SYNC.clear(type),
+    GG_SYNC.clear(type).then(() => Promise.all([
       GG_LEDGER ? GG_LEDGER.update(list => list.filter(e => e.pageType !== type)) : null,
       new Promise(resolve => chrome.storage.local.get(['ggRepairImport'], (r) => {
         const imp = r && r.ggRepairImport;
@@ -404,9 +412,13 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         if (items.length) chrome.storage.local.set({ ggRepairImport: Object.assign({}, imp, { items }) }, resolve);
         else chrome.storage.local.remove(['ggRepairImport'], resolve);
       })),
-    ]).then(() => {
-      log(`已清除 ${type} 的同步记录和补下载记录（其他分类不受影响），下次将从 ${L.fmt(L.earliestSyncDate(type))} 重新开始`, "onMessage");
+    ])).then(() => {
+      log(`已清除 ${type} 在实时GTO 里的同步记录和补下载记录（已导入的数据不删，其他分类不受影响），` +
+        `下次将从 ${L.fmt(L.earliestSyncDate(type))} 重新开始`, "onMessage");
       sendResponse && sendResponse({ success: true, pageType: type });
+    }, e => {
+      logWarning(`清除 ${type} 的同步记录失败：${e.message}`, "onMessage");
+      sendResponse && sendResponse({ error: e.message });
     });
     return true;
   }
@@ -736,6 +748,16 @@ let loopAbortMessage = null;
  * 同步开始前和实时GTO 确认完整后各调一次。
  */
 async function advanceWatermarkByLedger(pageType, syncTo, why) {
+  try {
+    await advanceWatermarkByLedgerOnce(pageType, syncTo, why);
+  } catch (e) {
+    // 推不过去只是下次多重下几天，不影响这次（读同步记录失败的话，开始同步时会再报）
+    if (!e.syncState) throw e;
+    logWarning(`按下载记录推进同步记录没成功：${e.message}`, "ledger");
+  }
+}
+
+async function advanceWatermarkByLedgerOnce(pageType, syncTo, why) {
   if (!pageType || !syncTo || !GG_LEDGER) return;
   const saved = await GG_SYNC.get(pageType);
   const from = saved.lastSyncedDate;
@@ -806,7 +828,7 @@ async function runAutomation() {
       const pageType = currentPageType();
       await advanceWatermarkByLedger(pageType, syncTo, '实时GTO 已确认完整');
       // 下过的都齐了，但同步记录没到终点：说明中间有日期根本没下（不是没下到），不能说全部完成
-      const reached = (await GG_SYNC.get(pageType)).lastSyncedDate;
+      const reached = await GG_SYNC.get(pageType).then(s => s.lastSyncedDate, () => currentStatus.lastSyncedDate);
       if (syncTo && reached && reached < syncTo) {
         const next = L.fmt(new Date(L.parse(reached).getTime() + L.MS_PER_DAY));
         const message = `已下载的都核对完整，但 ${next} 起还没有下载，同步记录停在 ${reached}，再点一次开始同步会从那里继续`;
@@ -1052,7 +1074,8 @@ async function planRepairFor(pageType, maxDate) {
   const [list, st, saved] = await Promise.all([
     GG_LEDGER.getAll(),
     storageGet(['ggDownloads', 'ggRepairImport']),
-    GG_SYNC.get(pageType),
+    // 连不上实时GTO 时也要能补之前核对出来缺的：同步记录读不到就只按 maxDate 截
+    GG_SYNC.get(pageType).catch(() => ({ lastSyncedDate: null })),
   ]);
   const attached = GG_LEDGER.attachDownloads(list, st.ggDownloads || []);
   const pending = GG_LEDGER.summarize(attached)
@@ -2321,8 +2344,20 @@ async function loopDownload(opts = {}) {
 
   // 之前下过、但因为中途有批次失败没推进同步记录的日期：先按下载记录推过去，免得整段重下
   if (!repair) await advanceWatermarkByLedger(pageType, L.fmt(L.today()), '按下载记录这些日期都已经下过');
-  // 同步区间不再由用户选，而是"上次同步到哪天的第二天 ~ 今天"
-  const saved = await GG_SYNC.get(pageType);
+  // 同步区间不再由用户选，而是"上次同步到哪天的第二天 ~ 今天"。
+  // 同步记录在实时GTO 里，读不到就不开始：不知道从哪天起，绝不能当成没同步过从头重下
+  let saved = {};
+  if (!repair) {
+    try {
+      saved = await GG_SYNC.get(pageType);
+    } catch (e) {
+      if (!e.syncState) throw e;
+      loopAbortMessage = `${e.message}，再点开始同步。`;
+      logWarning(loopAbortMessage, "loopDownload");
+      currentStatus.isRunning = false;
+      return;
+    }
+  }
   const plan = repair
     ? {
         from: opts.from,
@@ -3269,6 +3304,17 @@ async function loopDownload(opts = {}) {
       log("本批完成，等待下一批...", "loopDownload");
       await wait(randomBetween(1000, 3000));
     } catch (e) {
+      if (e.syncState) {
+        // 这一批下了，但同步记录没存进实时GTO：接着下也存不上，停下来（下载记录还在，下次按它推过去）
+        const message = `同步记录没保存到实时GTO（${e.message}），已停止同步。` +
+          `${startStr} ~ ${endStr} 已经点了下载，重新连上实时GTO 后再点开始同步会接着来。`;
+        logStepFailure(message);
+        contiguous = false;
+        record('中止', '同步记录保存失败');
+        dumpJournal();
+        loopAbortMessage = message;
+        return;
+      }
       logError(e, `loopDownload - 第 ${batchNo} 批`);
       if (await bailOnFailure()) { record('中止', `异常：${e.message || e}`); dumpJournal(); return; }
       advance('异常', String(e.message || e));
@@ -3287,7 +3333,7 @@ async function loopDownload(opts = {}) {
     );
     return { ok };
   }
-  const finalState = await GG_SYNC.get(pageType);
+  const finalState = await GG_SYNC.get(pageType).catch(() => ({ lastSyncedDate: currentStatus.lastSyncedDate }));
   if (contiguous) {
     logSuccess(
       `同步完成：${plan.from} ~ ${plan.to}，共 ${syncedBatches} 批 ${doneDays} 天。` +

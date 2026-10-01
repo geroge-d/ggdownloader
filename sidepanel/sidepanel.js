@@ -448,7 +448,8 @@ function renderSyncCard(info) {
   try { renderRtgto(); } catch (e) { /* 页面初始化时还没准备好，稍后会再画 */ }
 
   if (clearSyncBtn) {
-    clearSyncBtn.disabled = !info;
+    // 同步记录在实时GTO 里，连不上就清不了
+    clearSyncBtn.disabled = !info || !!info.syncError;
     clearSyncBtn.textContent = info
       ? t('clear_sync_page', { page: t(PAGE_TYPE_KEY[info.pageType] || 'badge_unknown') })
       : t('clear_sync');
@@ -472,6 +473,19 @@ function renderSyncCard(info) {
   syncBadgeSpan.textContent = hasSummary ? t('badge_summary_hands') : t('badge_hands_only');
   syncBadgeSpan.style.background = hasSummary ? '#1e3a2f' : '#3a2f1e';
   syncBadgeSpan.style.color = hasSummary ? '#4ade80' : '#fbbf24';
+
+  // 同步记录存在实时GTO 里：读不到就不知道从哪天开始，不能当成"没同步过"，也不能开始同步
+  if (info.syncError) {
+    const outdated = info.syncError.code === 'rtgto_outdated';
+    syncWatermarkSpan.textContent = t(outdated ? 'sync_state_rtgto_outdated' : 'sync_state_no_rtgto');
+    syncLastRunSpan.textContent = '—';
+    syncPendingSpan.textContent = '—';
+    syncPendingSpan.style.color = '#64748b';
+    coverageHint.innerHTML = `<span style="color:#f87171;">● ${escapeHtml(t(outdated ? 'sync_state_rtgto_outdated_hint' : 'sync_state_no_rtgto_hint'))}</span>`;
+    startStopBtn.disabled = true;
+    if (typeof renderRepair === 'function') renderRepair();
+    return;
+  }
 
   syncWatermarkSpan.textContent = saved.lastSyncedDate || t('never_synced');
   // 只看"真正下载了数据"的时间。旧版本记录的 lastRunAt 混着点击同步的时间，不再使用。
@@ -1032,6 +1046,8 @@ async function pingRtgto() {
   rtgto = r;
   renderRtgto();
   renderUpdateBanner();
+  // 同步记录在实时GTO 里：连上 / 断开都要重新读一次（同步中不打扰）
+  if (changed && !isRunning && mainPanel.style.display === 'flex') refreshSyncCard();
   // 刚连上时把之前没核对的补核一次（比如同步时实时GTO还没打开）
   if (changed && r.ok && !isRunning) verifyWithRtgto(true, 'connected');
 }
