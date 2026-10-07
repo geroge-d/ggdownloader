@@ -323,40 +323,73 @@ async function sendMessage(action, data = {}, opts = {}) {
 // 出问题也没法把上下文发给开发者。现在把重要日志（警告/错误/成功/批次里程碑）
 // 滚动列在这里，并提供"复制日志"一键取走。
 
-let lastLogCount = -1;
+// 持久化的运行日志（background 写在 ggRunLog 里，跨页面刷新、重新打开都在）。
+// 以前只显示 ggpokerStatus.importantLog，页面一刷新就从空的开始，上一次同步出了什么事查不到
+const RUN_LOG_KEY = 'ggRunLog';
+const RUN_LOG_SHOW = 500;   // 面板里只画最近这些条，复制日志时给全部
+let runLog = null;          // null = 还没读到（老版本没有持久日志时退回 importantLog）
+let lastLogSig = '';
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+function logDay(ms) { const d = new Date(ms); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
+function logTime(ms) { const d = new Date(ms); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; }
+
+chrome.storage.local.get([RUN_LOG_KEY], (r) => {
+  runLog = Array.isArray(r && r[RUN_LOG_KEY]) ? r[RUN_LOG_KEY] : [];
+  renderLog(lastRunStatus);
+});
+chrome.storage.onChanged && chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes[RUN_LOG_KEY]) {
+    runLog = changes[RUN_LOG_KEY].newValue || [];
+    renderLog(lastRunStatus);
+  }
+});
 
 function renderLog(status) {
-  const entries = (status && status.importantLog) || [];
-
-  if (!entries.length) {
-    // 没有重要日志时退回显示最后一条，免得一片空白
-    if (status && status.lastMessage) {
-      statusDiv.textContent = status.lastMessage;
-    } else {
-      statusDiv.textContent = t('log_empty');
+  const lines = [];
+  if (runLog && runLog.length) {
+    // 跨天的日志按日期分段，不然 00:16 和前一天的 22:53 分不清
+    let day = '';
+    for (const e of runLog.slice(-RUN_LOG_SHOW)) {
+      const d = logDay(e.at);
+      if (d !== day) {
+        day = d;
+        lines.push(`<div class="log-line info"><span class="lm">—— ${escapeHtml(d)} ——</span></div>`);
+      }
+      lines.push({ t: logTime(e.at), type: e.type, ctx: e.ctx, msg: e.msg });
     }
-    lastLogCount = 0;
+  } else {
+    for (const e of (status && status.importantLog) || []) lines.push(e);
+  }
+
+  if (!lines.length) {
+    // 没有重要日志时退回显示最后一条，免得一片空白
+    statusDiv.textContent = status && status.lastMessage ? status.lastMessage : t('log_empty');
+    lastLogSig = '';
     return;
   }
 
-  // 条数没变就不重绘，避免用户往回翻的时候被强行拉到底部
-  if (entries.length === lastLogCount) return;
+  // 内容没变就不重绘，避免用户往回翻的时候被强行拉到底部
+  const last = runLog && runLog.length ? runLog[runLog.length - 1] : null;
+  const sig = `${lines.length}|${last ? last.at + last.msg : ''}`;
+  if (sig === lastLogSig) return;
   const atBottom =
     statusDiv.parentElement.scrollTop + statusDiv.parentElement.clientHeight >=
     statusDiv.parentElement.scrollHeight - 30;
 
-  statusDiv.innerHTML = entries
+  statusDiv.innerHTML = lines
     .map((e) => {
+      if (typeof e === 'string') return e;
       // 分类标签（[batch] 之类）只在"复制日志"里保留，界面上占地方又看不懂
       return (
-        `<div class="log-line ${e.type}"${e.ctx ? ` title="${escapeHtml(e.ctx)}"` : ''}>` +
+        `<div class="log-line ${escapeHtml(e.type || '')}"${e.ctx ? ` title="${escapeHtml(e.ctx)}"` : ''}>` +
         `<span class="lt">${escapeHtml(String(e.t || '').slice(0, 5))}</span>` +
         `<span class="lm">${escapeHtml(e.msg)}</span></div>`
       );
     })
     .join('');
 
-  lastLogCount = entries.length;
+  lastLogSig = sig;
   // 本来就在底部才自动跟随
   if (atBottom) {
     statusDiv.parentElement.scrollTop = statusDiv.parentElement.scrollHeight;
@@ -377,7 +410,11 @@ copyLogBtn && copyLogBtn.addEventListener('click', async function () {
   const st = (res && res.ggpokerStatus) || {};
   const lastVerify = res && res.ggRtgtoLastVerify;
   const clickStats = Array.isArray(res && res.ggClickStats) ? res.ggClickStats.slice(-10) : [];
-  const entries = st.importantLog || [];
+  // 优先用持久化的日志（包括之前几次打开页面的）；读不到再退回本次页面的
+  const persisted = await new Promise((r) => chrome.storage.local.get([RUN_LOG_KEY], (x) => r(x && x[RUN_LOG_KEY])));
+  const entries = Array.isArray(persisted) && persisted.length
+    ? persisted.map((e) => ({ t: `${logDay(e.at)} ${logTime(e.at)}`, ctx: e.ctx, type: e.type, msg: e.msg }))
+    : (st.importantLog || []);
   // 版本号测试期间不变，靠构建编号看出用的是哪一版扩展
   let build = '-';
   try {

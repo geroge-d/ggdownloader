@@ -34,6 +34,9 @@ let currentStatus = {
   lastMessage: "",
   importantLog: [],   // 状态栏滚动显示的重要日志
 };
+// 待交给 background 持久保存的重要日志（见 persistLog）
+const runLogQueue = [];
+let runLogTimer = null;
 
 // 国际化字典和翻译函数
 const I18N = {
@@ -327,7 +330,27 @@ function pushImportant(type, message, context) {
   if (currentStatus.importantLog.length > IMPORTANT_LOG_MAX) {
     currentStatus.importantLog = currentStatus.importantLog.slice(-IMPORTANT_LOG_MAX);
   }
+  persistLog(type, message, context, d);
 }
+
+// 重要日志同时交给 background 持久保存（ggRunLog）：页面刷新、重新打开后还能看到、复制出来查问题。
+// 攒一小会儿再发，一批几十条的日志不用发几十次消息（队列声明在文件开头，早于任何日志调用）
+function persistLog(type, message, context, d) {
+  runLogQueue.push({ at: (d || new Date()).getTime(), type, ctx: context || "", msg: String(message) });
+  if (!runLogTimer) runLogTimer = setTimeout(flushRunLog, 500);
+}
+function flushRunLog() {
+  if (runLogTimer) { clearTimeout(runLogTimer); runLogTimer = null; }
+  if (!runLogQueue.length) return;
+  const entries = runLogQueue.splice(0);
+  try {
+    chrome.runtime.sendMessage({ action: 'appendRunLog', entries }, () => void chrome.runtime.lastError);
+  } catch (e) { /* 扩展刚重载，旧页面的脚本已失效 */ }
+}
+// 关页面 / 刷新前把攒着的发出去
+window.addEventListener('pagehide', flushRunLog);
+// 每次页面打开记一笔，持久日志里能分清哪些是同一次打开页面里发生的
+persistLog("info", `页面打开：${location.href}（扩展 v${chrome.runtime.getManifest().version}）`, "page");
 
 // 更新状态并保存到storage
 function updateStatus(type, message, context) {

@@ -297,6 +297,34 @@ function bgLog(level, scope, message, detail) {
   }
 }
 
+// —— 持久化的运行日志（侧边栏"运行日志"和"复制日志"用）——
+//
+// 以前运行日志只放在 ggpokerStatus 里，页面一刷新、重新打开，content script 从空列表开始，
+// 第一次写状态就把上一次同步的日志盖掉了：出了问题（比如某一批被判成没数据）事后根本查不到。
+// 现在每条重要日志都交给这里，跨页面、跨重启保留最近 RUN_LOG_MAX 条。
+// 只由 background 一处写：几个标签页各自读改写会互相覆盖。
+const RUN_LOG_KEY = 'ggRunLog';
+const RUN_LOG_MAX = 3000;
+let runLogCache = null;   // Service Worker 重启后为 null，用到时再从存储读
+let runLogChain = Promise.resolve();
+
+function appendRunLog(entries) {
+  if (!Array.isArray(entries) || !entries.length) return runLogChain;
+  runLogChain = runLogChain.then(async () => {
+    if (!runLogCache) {
+      const r = await chrome.storage.local.get([RUN_LOG_KEY]);
+      runLogCache = Array.isArray(r[RUN_LOG_KEY]) ? r[RUN_LOG_KEY] : [];
+    }
+    runLogCache = runLogCache.concat(entries);
+    if (runLogCache.length > RUN_LOG_MAX) runLogCache = runLogCache.slice(-RUN_LOG_MAX);
+    await chrome.storage.local.set({ [RUN_LOG_KEY]: runLogCache });
+  }).catch((e) => {
+    runLogCache = null;   // 下次重新从存储读，别拿半截的缓存覆盖
+    console.error('[GGPoker助手] 写运行日志失败', e);
+  });
+  return runLogChain;
+}
+
 /** detail 里可能有不可序列化的东西（Error、Response），转成能存的形式。 */
 function safeDetail(detail) {
   if (detail === undefined || detail === null) return undefined;
@@ -425,6 +453,11 @@ async function fetchLogin(userName, password) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'getLogs') {
     sendResponse({ logs: logRing });
+    return true;
+  }
+
+  if (message.action === 'appendRunLog') {
+    appendRunLog(message.entries).then(() => sendResponse({ ok: true }));
     return true;
   }
 
