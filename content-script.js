@@ -1879,6 +1879,7 @@ async function waitForTableSettled(fpBefore, netBefore, timeout = 180000) {
     rows,
     fingerprint: fp,
     viaNetwork: true,
+    fired,
   };
 }
 
@@ -2442,6 +2443,35 @@ async function loopDownload(opts = {}) {
   // 那样的空结果照常接受，否则整段没打牌的分类每批都要多加载一次；2 分钟以上在以前就算超时了，
   // 线上漏掉 2～9 月数据的正是这一类
   const EMPTY_TRUST_MS = 120000;
+  // 以前在列表里见过数据的日期段（下载记录里点过下载、按钮上有条数的）：判空时拿来对照。
+  // 线上 10-08 的同步最后一批 09-08~10-08 列表是空的，被当成没打牌推进了同步记录，
+  // 可 09-29 那次同步在 08-30~09-29 点过 412 条概要，10-03~10-05 页面上也明明有比赛。
+  // 最后一批后面没有别的批次能发现误判（emptyRanges 只靠后面的批次纠正），漏掉就是永久的。
+  const listFrom = L.fmt(plan.hasSummary ? earliestSummary : earliestHistory);
+  const knownData = GG_LEDGER
+    ? (await GG_LEDGER.getAll()).filter(e =>
+        e.pageType === pageType && e.status === 'clicked' && e.count > 0 && e.from && e.to && e.to >= listFrom)
+    : [];
+  // 下载记录里和这一段日期重叠、按天数比例估计至少有几条的那条记录
+  const knownDataIn = (fromStr, toStr) => {
+    let best = null;
+    for (const e of knownData) {
+      const lo = [e.from, fromStr, listFrom].sort().pop();
+      const hi = [e.to, toStr].sort()[0];
+      if (lo > hi) continue;
+      const entryDays = L.diffDays(L.parse(e.to), L.parse(e.from)) + 1;
+      const overlap = L.diffDays(L.parse(hi), L.parse(lo)) + 1;
+      const expected = Math.round(e.count * overlap / entryDays);
+      // 整段都在本批里，或者一大半在本批里且按比例也有不少条：本批不可能是空的
+      const certain = (e.from >= fromStr && e.to <= toStr) || (overlap * 2 >= entryDays && expected >= 20);
+      if (!best || certain > best.certain || (certain === best.certain && expected > best.expected)) {
+        best = { entry: e, expected, certain };
+      }
+    }
+    return best;
+  };
+  // 已经为"空结果可疑"原样重查过的日期段：每段只重查一次
+  let emptyRecheckedRange = '';
 
   // GG 真实的"一次最多能选多少场"。
   // 内置常量（概要 500 / 手牌按 2 万手折 100 场）只是估计，线上已证明会超限；
@@ -2994,6 +3024,12 @@ async function loopDownload(opts = {}) {
             const back = new Date(hit.start.getTime() - L.MS_PER_DAY);
             logWarning(`${hit.from} ~ ${hit.to} 之前被判成没数据，其实有对局：同步记录退回到 ${L.fmt(back)}，从 ${hit.from} 重新下`, "loopDownload");
             if (!repair) await GG_SYNC.rewind(pageType, L.fmt(back));
+            // 这次同步里从那一段起记下的"没数据"作废：否则核对后按下载记录推进同步记录时，
+            // 这些日期仍算"下过"，刚退回的同步记录又会被推过去
+            if (GG_LEDGER) {
+              await GG_LEDGER.update((all) => all.filter((e) =>
+                !(e.runId === runId && e.pageType === pageType && e.status === 'no_data' && e.to >= hit.from)));
+            }
             emptyRanges.splice(emptyRanges.indexOf(hit));
             doneDays = Math.max(0, doneDays - (L.diffDays(roundStart, hit.start)));
             cursorStart = new Date(hit.start);
@@ -3047,6 +3083,29 @@ async function loopDownload(opts = {}) {
           logWarning(`复查时页面仍在加载，第 ${redoCount} 次重做本批`, "loopDownload");
           redo('重做', '复查时页面仍在加载');
           continue;   // 不 advance、不 commit，原样重来
+        } else if (emptyRecheckedRange !== `${startStr}~${endStr}` && (() => {
+          const known = knownDataIn(startStr, endStr);
+          const expected = Math.round(density.rate * batchDays);
+          const reasons = [];
+          if (known) reasons.push(`下载记录里 ${known.entry.from}~${known.entry.to} 下过 ${known.entry.count} 条`);
+          if (expected >= 20) reasons.push(`按本次的密度这几天应有约 ${expected} 行`);
+          if (roundEnd >= end) reasons.push('这是本次同步的最后一批（后面没有批次能发现误判）');
+          if (settle.fired === false) reasons.push('点显示后没看到新的网络请求');
+          if (!reasons.length) return false;
+          emptyRecheckedRange = `${startStr}~${endStr}`;
+          logWarning(`${startStr} ~ ${endStr} 显示 0 行，但${reasons.join('；')}，不能直接当成没数据：原样重查一次`, "loopDownload");
+          return true;
+        })()) {
+          redo('重做', '空结果可疑，原样重查一次');
+          continue;   // 不 advance、不 commit
+        } else if (knownDataIn(startStr, endStr) && knownDataIn(startStr, endStr).certain) {
+          // 重查还是空，可下载记录说明这几天肯定有对局：不推进同步记录，记成没下到，交给核对后的补下载
+          const k = knownDataIn(startStr, endStr);
+          logStepFailure(
+            `${startStr} ~ ${endStr} 重查仍显示 0 行，但下载记录里 ${k.entry.from}~${k.entry.to} 下过 ${k.entry.count} 条，` +
+            `不可能没有对局：本批不推进同步记录，稍后补下`);
+          if (await bailOnFailure()) { record('中止', '列表为空但下载记录里有数据'); dumpJournal(); return; }
+          advance('失败', '列表为空但下载记录里这几天有数据'); continue;
         } else if (settle.viaNetwork && (batchDays > 1 || !confirmingEmpty) &&
                    (settle.failed || (!confirmingEmpty && batchDays > trustedEmptySpan &&
                                       Date.now() - showClickedAt - (settle.queuedMs || 0) > EMPTY_TRUST_MS))) {
