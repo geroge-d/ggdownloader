@@ -138,7 +138,7 @@
 3. 每轮同步 / 补下载结束（或刚连上实时GTO 时），侧边栏 `POST /gg-bridge/v1/verify`：
 
    ```json
-   { "protocol": 1, "extensionVersion": "1.2.0", "downloadDir": "C:\\Users\\me\\Downloads",
+   { "protocol": 1, "extensionVersion": "1.3.0", "downloadDir": "C:\\Users\\me\\Downloads",
      "entries": [ { "id": "…", "pageType": "tournament", "kind": "history", "from": "2026-07-01", "to": "2026-07-10",
                     "count": 95, "download": { "file": "C:\\…\\000001a0-….zip", "state": "complete" } } ] }
    ```
