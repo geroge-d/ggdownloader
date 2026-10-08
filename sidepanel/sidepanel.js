@@ -475,6 +475,10 @@ const PAGE_TYPE_KEY = {
   rushAndCash: 'page_rush_and_cash',
   holdem: 'page_holdem',
   plo: 'page_plo',
+  battleRoyale: 'page_battle_royale',
+  spinAndGold: 'page_spin_and_gold',
+  aof: 'page_aof',
+  shortDeck: 'page_short_deck',
 };
 
 let currentPlan = null;   // 最近一次从页面拿到的同步计划
@@ -506,7 +510,7 @@ function renderSyncCard(info) {
   const { pageType, hasSummary, saved, plan } = info;
 
   syncPageTypeSpan.textContent = t(PAGE_TYPE_KEY[pageType] || 'badge_unknown');
-  // 只有锦标赛(MTT)有"游戏概要"，其它两种只有手牌详情 —— 直接标出来
+  // 只有锦标赛类（MTT / 神秘大逃杀 / 黄金转盘）有"游戏概要"，其它只有手牌详情 —— 直接标出来
   syncBadgeSpan.textContent = hasSummary ? t('badge_summary_hands') : t('badge_hands_only');
   syncBadgeSpan.style.background = hasSummary ? '#1e3a2f' : '#3a2f1e';
   syncBadgeSpan.style.color = hasSummary ? '#4ade80' : '#fbbf24';
@@ -548,7 +552,7 @@ function renderSyncCard(info) {
     } else if (plan.history) {
       lines.push(`<span style="color:#4ade80;">● ${t('coverage_hands')}</span>：${plan.history.start} ~ ${plan.history.end}`);
     }
-    // 非 MTT 页面的同步窗口本来就只有 3 个月，不会有"仅概要"那一段
+    // 没有概要的页面同步窗口本来就只有 3 个月，不会有"仅概要"那一段
     if (plan.summaryOnly && hasSummary) {
       lines.push(`<span style="color:#fbbf24;">● ${t('coverage_summary_only')}</span>：${plan.summaryOnly.start} ~ ${plan.summaryOnly.end}`);
     }
@@ -590,7 +594,7 @@ async function refreshSyncCard() {
   renderRulesInfo(res && res.rules);
 }
 
-// 在 MTT / 极速 / 德扑 / PLO 之间切换时，卡片要跟着显示当前分类的同步状态。
+// 在各分类（MTT / 极速 / 德扑 / PLO / 神秘大逃杀 / 黄金转盘 / 全押或弃牌 / 短牌）之间切换时，卡片要跟着显示当前分类的同步状态。
 // PokerCraft 是单页应用，切 tab 只是 pushState，不会重新加载页面，
 // 所以既听标签页事件，也每 2 秒比对一次地址兜底（只查地址，地址变了才去问页面）。
 let lastTabUrl = null;

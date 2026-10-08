@@ -31,6 +31,12 @@
       holdem: "my\\.pokercraft\\.com/holdem",
       // 奥马哈：和德扑现金局一样只有手牌历史，筛选栏多一个"游戏"下拉，不影响按"日期"找下拉
       plo: "my\\.pokercraft\\.com/plo(?:[/?#]|$)",
+      // 神秘大逃杀、黄金转盘：和锦标赛一样有"游戏概括信息"和"手牌历史"两个下载按钮
+      battleRoyale: "my\\.pokercraft\\.com/battle-royale",
+      spinAndGold: "my\\.pokercraft\\.com/spin-and-gold",
+      // 全押或弃牌、短牌：和现金局一样只有手牌历史
+      aof: "my\\.pokercraft\\.com/aof(?:[/?#]|$)",
+      shortDeck: "my\\.pokercraft\\.com/short-deck",
     },
 
     selectors: {

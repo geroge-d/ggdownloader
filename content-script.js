@@ -98,6 +98,10 @@ const PAGE_CONFIGS = {
   rushAndCash: { hasSummary: false },
   holdem: { hasSummary: false },
   plo: { hasSummary: false },
+  battleRoyale: { hasSummary: true },
+  spinAndGold: { hasSummary: true },
+  aof: { hasSummary: false },
+  shortDeck: { hasSummary: false },
 };
 
 function getPageTypeStrict() {
@@ -2729,7 +2733,7 @@ async function loopDownload(opts = {}) {
       summaryFrom: L.fmt(earliestSummary),
       historyFrom: L.fmt(earliestHistory),
     });
-    // 这一批按 GG 的限制"应该有"哪几类数据：概要只有 MTT 有且回溯 12 个月，手牌只回溯 3 个月
+    // 这一批按 GG 的限制"应该有"哪几类数据：概要只有锦标赛类（MTT / 神秘大逃杀 / 黄金转盘）有且回溯 12 个月，手牌只回溯 3 个月
     const expectedKinds = () => {
       const kinds = [];
       if (wantSummary && currentPageConfig().hasSummary && roundEnd >= earliestSummary) kinds.push('summary');

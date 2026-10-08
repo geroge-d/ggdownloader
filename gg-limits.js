@@ -87,7 +87,7 @@
     parse,
     diffDays,
 
-    /** 这个页面类型能往回同步到哪天：MTT 12 个月，其它只有手牌的 3 个月。 */
+    /** 这个页面类型能往回同步到哪天：有概要的（MTT / 神秘大逃杀 / 黄金转盘）12 个月，其它只有手牌的 3 个月。 */
     earliestSyncDate(pageType, ref) {
       const now = ref || today();
       return LIMITS.pageConfig(pageType).hasSummary
@@ -319,12 +319,17 @@
     },
 
     // —— 页面类型 ——
-    // 只有锦标赛(MTT)页面有"游戏概要"下载按钮；极速现金和德州扑克只有手牌详情。
+    // 锦标赛类页面（MTT、神秘大逃杀、黄金转盘）有"游戏概要"下载按钮；
+    // 极速现金、德州扑克、奥马哈、全押或弃牌、短牌只有手牌详情。
     PAGE_TYPES: {
-      tournament:  { key: "tournament",  hasSummary: true  },
-      rushAndCash: { key: "rushAndCash", hasSummary: false },
-      holdem:      { key: "holdem",      hasSummary: false },
-      plo:         { key: "plo",         hasSummary: false },
+      tournament:   { key: "tournament",   hasSummary: true  },
+      rushAndCash:  { key: "rushAndCash",  hasSummary: false },
+      holdem:       { key: "holdem",       hasSummary: false },
+      plo:          { key: "plo",          hasSummary: false },
+      battleRoyale: { key: "battleRoyale", hasSummary: true  },
+      spinAndGold:  { key: "spinAndGold",  hasSummary: true  },
+      aof:          { key: "aof",          hasSummary: false },
+      shortDeck:    { key: "shortDeck",    hasSummary: false },
     },
 
     pageConfig(pageType) {
@@ -346,8 +351,8 @@
       const historyFrom = LIMITS.earliestHistoryDate(now);
 
       // 能往回追多久，取决于这个页面有没有"游戏概要"：
-      //   · 锦标赛(MTT) 有概要，概要能查 12 个月，所以窗口是 12 个月；
-      //   · 极速现金 / 德州扑克只有手牌详情，GG 只留 3 个月 ——
+      //   · 锦标赛(MTT) / 神秘大逃杀 / 黄金转盘 有概要，概要能查 12 个月，所以窗口是 12 个月；
+      //   · 极速现金 / 德州扑克 / PLO / 全押或弃牌 / 短牌 只有手牌详情，GG 只留 3 个月 ——
       //     再往前跑就是空转，那些日子服务端本来就没有记录。
       const hasSummary = pageType ? LIMITS.pageConfig(pageType).hasSummary : true;
       const earliest = hasSummary

@@ -6,7 +6,11 @@
     "tournament": "my\\.pokercraft\\.com/tournament",
     "rushAndCash": "my\\.pokercraft\\.com/rush-and-cash",
     "holdem": "my\\.pokercraft\\.com/holdem",
-    "plo": "my\\.pokercraft\\.com/plo(?:[/?#]|$)"
+    "plo": "my\\.pokercraft\\.com/plo(?:[/?#]|$)",
+    "battleRoyale": "my\\.pokercraft\\.com/battle-royale",
+    "spinAndGold": "my\\.pokercraft\\.com/spin-and-gold",
+    "aof": "my\\.pokercraft\\.com/aof(?:[/?#]|$)",
+    "shortDeck": "my\\.pokercraft\\.com/short-deck"
   },
   "selectors": {
     "dateSelectLabels": [

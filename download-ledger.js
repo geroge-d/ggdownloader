@@ -36,7 +36,9 @@
   const FORMAT_VERSION = 1;
 
   const KINDS = ["summary", "history"];
-  const PAGE_TYPES = ["tournament", "rushAndCash", "holdem", "plo"];
+  const PAGE_TYPES = ["tournament", "rushAndCash", "holdem", "plo", "battleRoyale", "spinAndGold", "aof", "shortDeck"];
+  // 有"游戏概要"的分类，其余只有手牌
+  const SUMMARY_PAGE_TYPES = ["tournament", "battleRoyale", "spinAndGold"];
 
   function readAll() {
     return new Promise((resolve) => {
@@ -318,7 +320,7 @@
                 { pageType: "plo", from: "2026-08-10", to: "2026-08-10" },
               ],
             },
-            notes: "pageType: tournament/rushAndCash/holdem/plo；kind: summary/history，省略表示两类都补",
+            notes: "pageType: tournament/rushAndCash/holdem/plo/battleRoyale/spinAndGold/aof/shortDeck；kind: summary/history（summary 只有 tournament/battleRoyale/spinAndGold 有），省略表示该分类有的都补",
           },
         },
         meta || {},
@@ -333,8 +335,9 @@
      *   { "format": "gg-missing-ranges", "formatVersion": 1,
      *     "missing": [ { "pageType": "tournament", "kind": "history", "from": "2026-07-01", "to": "2026-07-03" } ] }
      *
-     * pageType 接受 tournament/mtt、rushAndCash/rush、holdem/nlh、plo/omaha；
-     * kind 接受 summary / history，不写表示这段日期两类都要补（非 MTT 只有手牌）。
+     * pageType 接受 tournament/mtt、rushAndCash/rush、holdem/nlh、plo/omaha、
+     * battleRoyale/battle-royale/br、spinAndGold/spin-and-gold/spin、aof、shortDeck/short-deck；
+     * kind 接受 summary / history，不写表示这段日期两类都要补（只有锦标赛类有概要，其余只有手牌）。
      * 返回 { items, errors }，items 已展开成单一 kind。
      */
     parseMissing(data) {
@@ -343,6 +346,10 @@
         rushandcash: "rushAndCash", "rush-and-cash": "rushAndCash", rush: "rushAndCash",
         holdem: "holdem", nlh: "holdem",
         plo: "plo", omaha: "plo",
+        battleroyale: "battleRoyale", "battle-royale": "battleRoyale", br: "battleRoyale",
+        spinandgold: "spinAndGold", "spin-and-gold": "spinAndGold", spin: "spinAndGold",
+        aof: "aof",
+        shortdeck: "shortDeck", "short-deck": "shortDeck",
       };
       const KD = {
         summary: "summary", summaries: "summary",
@@ -364,12 +371,12 @@
         }
         let kinds;
         if (r.kind === undefined || r.kind === null || r.kind === "" || r.kind === "both") {
-          kinds = pageType === "tournament" ? ["summary", "history"] : ["history"];
+          kinds = SUMMARY_PAGE_TYPES.includes(pageType) ? ["summary", "history"] : ["history"];
         } else {
           const k = KD[String(r.kind).toLowerCase()];
           if (!k) return errors.push(`第 ${i + 1} 条：不认识的 kind ${r.kind}`);
-          if (k === "summary" && pageType !== "tournament") {
-            return errors.push(`第 ${i + 1} 条：只有锦标赛有游戏概要`);
+          if (k === "summary" && !SUMMARY_PAGE_TYPES.includes(pageType)) {
+            return errors.push(`第 ${i + 1} 条：只有锦标赛 / 神秘大逃杀 / 黄金转盘有游戏概要`);
           }
           kinds = [k];
         }

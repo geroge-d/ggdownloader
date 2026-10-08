@@ -101,7 +101,7 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| `pageType` | `tournament` / `rushAndCash` / `holdem` / `plo` |
+| `pageType` | `tournament` / `rushAndCash` / `holdem` / `plo` / `battleRoyale`（神秘大逃杀）/ `spinAndGold`（黄金转盘）/ `aof`（全押或弃牌）/ `shortDeck`（短牌） |
 | `kind` | `summary` 游戏概要（仅锦标赛）/ `history` 手牌历史 |
 | `from` `to` | PokerCraft 日期筛选的起止日，含首尾，浏览器本地时区 |
 | `status` | `clicked` 点了下载 / `no_data` 确认无对局 / `failed` 未完成 |
@@ -152,7 +152,7 @@
 
 ### 同步记录存在实时GTO 里
 
-每个分类（`tournament` / `rushAndCash` / `holdem` / `plo`）同步到哪一天，保存在实时GTO 的牌局数据库里
+每个分类（`tournament` / `rushAndCash` / `holdem` / `plo` / `battleRoyale` / `spinAndGold` / `aof` / `shortDeck`）同步到哪一天，保存在实时GTO 的牌局数据库里
 （`gg_sync_state` 表，实时GTO 侧 `gg_sync_state_store.dart`），扩展自己不存（`sync-state.js` 经 background 转发）：
 
 - 实时GTO 里没有这个分类的记录 = 没同步过，从 GG 保留期的最早一天开始；
