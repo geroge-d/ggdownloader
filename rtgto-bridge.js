@@ -24,6 +24,9 @@
   const HELLO_TIMEOUT_MS = 5000;
   // 核对时实时GTO 要解析、导入、备份文件，文件多时要一会儿
   const VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
+  // 同步记录存在实时GTO 的手牌数据库里：后台正在导入、备份时写一条记录也可能要等好几秒，
+  // 5 秒就放弃会让整轮同步半路停下（线上黄金转盘同步因此中止）
+  const SYNC_STATE_TIMEOUT_MS = 30 * 1000;
 
   let port = null;   // 上次连通的端口
 
@@ -163,13 +166,13 @@
       // 旧版扩展存在本地的同步记录先交给实时GTO；没交完就不往下读，免得被当成没同步过从头重下
       await migrateLegacySyncState();
       if (body.op === "get") {
-        return (await request(port, "/sync-state", { method: "GET" }, HELLO_TIMEOUT_MS)).states || {};
+        return (await request(port, "/sync-state", { method: "GET" }, SYNC_STATE_TIMEOUT_MS)).states || {};
       }
       return (await request(port, "/sync-state", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-      }, HELLO_TIMEOUT_MS)).state || null;
+      }, SYNC_STATE_TIMEOUT_MS)).state || null;
     },
   };
 
@@ -195,7 +198,7 @@
               op: "migrate", pageType, date: s.lastSyncedDate,
               lastDataSyncAt: s.lastDataSyncAt || null, batches: s.batches || 0, days: s.days || 0,
             }),
-          }, HELLO_TIMEOUT_MS);
+          }, SYNC_STATE_TIMEOUT_MS);
           console.log(`[同步记录迁移] ${pageType} ${s.lastSyncedDate}：` +
             (res && res.migrated ? "已交给实时GTO" : "实时GTO 里已有记录，以它为准"));
         }

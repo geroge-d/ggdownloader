@@ -2717,6 +2717,7 @@ async function loopDownload(opts = {}) {
     // 否则会死循环卡在同一段日期上（缩小跨度重试是唯一例外）。
     let advanced = false;
     let committedThisBatch = false;
+    let batchDownloaded = false;   // 这一批点了下载（不是确认没数据），只用于出错时的提示
     let batchRows = 0;
     let batchSummary = 0;
     let batchHistory = 0;
@@ -2811,6 +2812,7 @@ async function loopDownload(opts = {}) {
     // downloaded：这一批是否真的下载了数据（无数据批次只推进水位线，不算数据同步）
     const commit = async (downloaded) => {
       syncedBatches++;
+      batchDownloaded = !!downloaded;
       // 补下载补的是水位线以内的旧日期，水位线本来就在它后面，不能动
       if (repair) return;
       if (!contiguous) {
@@ -3393,7 +3395,8 @@ async function loopDownload(opts = {}) {
       if (e.syncState) {
         // 这一批下了，但同步记录没存进实时GTO：接着下也存不上，停下来（下载记录还在，下次按它推过去）
         const message = `同步记录没保存到实时GTO（${e.message}），已停止同步。` +
-          `${startStr} ~ ${endStr} 已经点了下载，重新连上实时GTO 后再点开始同步会接着来。`;
+          `${startStr} ~ ${endStr} ${batchDownloaded ? "已经点了下载" : "这几天没有对局"}，` +
+          `等实时GTO 空下来（不在导入、备份）后再点开始同步会接着来。`;
         logStepFailure(message);
         contiguous = false;
         record('中止', '同步记录保存失败');

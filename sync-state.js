@@ -37,7 +37,29 @@
     rtgto_outdated: "实时GTO 版本太旧，还不能保存同步记录，请先更新实时GTO",
   };
 
-  function call(body) {
+  // 实时GTO 后台导入、备份时可能一时回不上（超时 / 探测不到），这时停掉整轮同步不值得：
+  // 写同步记录（advance / rewind / clear 重复做也一样）隔一会儿再试几次；
+  // 读只在出错时再试一次，连不上马上告诉用户。实时GTO 太旧再试也没用。
+  const WRITE_RETRY_WAITS_MS = [3000, 8000, 15000];
+  const READ_RETRY_WAITS_MS = [2000];
+
+  async function call(body) {
+    const write = body.op !== "get";
+    const waits = write ? WRITE_RETRY_WAITS_MS : READ_RETRY_WAITS_MS;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await callOnce(body);
+      } catch (err) {
+        const retryable = err.code === "failed" || (write && err.code === "not_connected");
+        if (!retryable || attempt >= waits.length) throw err;
+        console.warn(`[GGPoker助手] 同步记录 ${body.op} ${body.pageType || ""} 第 ${attempt + 1} 次失败（${err.message}），` +
+          `${waits[attempt] / 1000} 秒后重试`);
+        await new Promise((r) => setTimeout(r, waits[attempt]));
+      }
+    }
+  }
+
+  function callOnce(body) {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ action: "syncState", body }, (res) => {
         const lost = chrome.runtime.lastError;
