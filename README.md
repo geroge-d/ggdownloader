@@ -1,40 +1,31 @@
 # GGPoker记录下载助手
 
+**简体中文** | [English](README.en.md)
+
 一个帮助 GGPoker 用户下载游戏记录和历史手牌的浏览器扩展，支持 Chrome 和 Microsoft Edge。
+下载的记录可直接导入[实时GTO（RtGTO）](https://www.rtgto.net)分析。
+
+软件官网：[www.rtgto.net](https://www.rtgto.net)
+
+## 界面预览
+
+<p>
+  <img src="docs/images/sidepanel-zh-main.png" width="300" alt="主界面：同步状态、进度、下载核对、运行日志">
+</p>
+
+同步中的主界面：同步状态、进度、[实时GTO](https://www.rtgto.net) 下载核对、运行日志。图中为示例数据。
 
 ## 功能特点
 
-- **权限控制**：仅付费/授权用户可用，需登录后才能使用主功能。
-- **登录体验**：
-  - 支持用户名、密码输入
-  - 记住密码选项
-  - 自动填充上次登录信息
-  - 登录失败有友好提示
-  - 支持中英文双语界面
-- **用户信息展示**：
-  - 登录后主界面顶部显示用户名和到期时间
-  - 清晰的状态反馈
-- **记录下载**：
-  - 支持自定义日期范围（最长360天）
-  - 支持日期间隔分批下载（1-3天）
-  - 支持一键开始、暂停、恢复、停止
-  - 智能分批处理，避免超时
-  - 自动跳过无数据日期
-- **状态反馈**：
-  - 实时显示下载进度和状态
-  - 支持多种状态提示（成功、警告、错误等）
-  - 详细的日志记录
-  - 运行日志持久保存（`chrome.storage.local` 的 `ggRunLog`，最近 3000 条），刷新或重新打开页面后仍在，「复制日志」带日期全部复制
-  - 人性化的错误提示
-- **数据安全**：
-  - 所有敏感信息仅存储于本地
-  - 绝不上传服务器
-  - 支持清除本地缓存
-- **兼容性**：
-  - 支持 Chrome 116+ 和 Edge 116+（同一个扩展包，无需单独打包）
-  - 仅在 GGPoker 官方网站可用
-  - 采用 Side Panel 现代界面
-  - 支持响应式布局
+- **一键同步，不用选日期**：记住每个分类同步到了哪一天，点「开始同步」就把那之后到今天的记录补齐；第一次同步从 GG 还保留的最早一天开始。
+- **支持 8 个分类**：锦标赛（MTT）、神秘大逃杀、黄金转盘下载游戏概要和手牌历史；极速现金局、德州扑克、奥马哈（PLO）、全押或弃牌、短牌下载手牌历史。
+- **尽量下全**：GG 只保留最近 12 个月的概要、最近 3 个月的手牌，扩展按这个范围自动下载；批次跨度按 GG 单次上限（500 场概要 / 2 万手）自动调整，单日超限也会拆开下。
+- **你来点下载**：每批都会高亮 GG 页面上的下载按钮，等你点击后再继续；可随时暂停、继续或停止。
+- **还没打完的比赛**：照样下载已有的概要和手牌，比赛结束后再同步会从那天起重新下载完整数据。
+- **配合[实时GTO](https://www.rtgto.net) 自动核对**：本机打开[实时GTO](https://www.rtgto.net) 时，下载的文件自动交给它检查并导入；网络中断等原因漏下的日期会列进「补下载」，一键补齐。
+- **运行日志**：每一步都有记录，刷新或重新打开侧边栏后仍在，出问题时「复制日志」发给客服即可。
+- **中英文界面**，支持 Chrome 和 Edge。
+- **数据留在本地**：下载的记录保存在浏览器的下载目录，扩展不上传你的手牌。
 
 ## 系统要求
 
@@ -84,14 +75,14 @@
 6. 下载完成后：
    - 记录会保存在浏览器的下载目录中
 
-## 下载记录与补下载（对接实时GTO / RtGTO 分析模块）
+## 下载记录与补下载（对接[实时GTO / RtGTO](https://www.rtgto.net) 分析模块）
 
 扩展只能确认用户**点了**下载按钮，无法确认文件是否真正下载成功（网络中断时会静默失败）。
-所以每段日期的处理结果都会记下来，交给实时GTO分析模块核对，漏下的再导回来补下载。
+所以每段日期的处理结果都会记下来，交给[实时GTO](https://www.rtgto.net)分析模块核对，漏下的再导回来补下载。
 
 1. 同步时自动记录（`download-ledger.js`，存在 `chrome.storage.local` 的 `ggDownloadLedger`）
 2. 侧边栏「下载记录」→ 导出 JSON / CSV
-3. 实时GTO分析模块核对，输出漏下的区间
+3. [实时GTO](https://www.rtgto.net)分析模块核对，输出漏下的区间
 4. 侧边栏「导入核对结果」→「补下载当前分类」：只下漏掉的日期和类别，不改同步进度
 
 ### 导出格式（`format: "gg-download-ledger"`）
@@ -126,16 +117,16 @@
 
 `kind` 省略表示两类都补（非锦标赛只有手牌）。超出 GG 保留期的部分无法补；晚于同步进度的部分交给正常同步。
 
-### 和实时GTO 自动核对（同一台机器）
+### 和[实时GTO](https://www.rtgto.net) 自动核对（同一台机器）
 
-实时GTO 启动后在 `127.0.0.1` 上监听（端口 47651，被占用时顺延到 47652、47653），本机请求都接受，
-不做来源校验——这只是本机上的便利通道。扩展侧的实现在 `rtgto-bridge.js`，实时GTO 侧在
+[实时GTO](https://www.rtgto.net) 启动后在 `127.0.0.1` 上监听（端口 47651，被占用时顺延到 47652、47653），本机请求都接受，
+不做来源校验——这只是本机上的便利通道。扩展侧的实现在 `rtgto-bridge.js`，[实时GTO](https://www.rtgto.net) 侧在
 `pokermaster/lib/modules/as/service/gg_bridge/`。
 
 1. 用户点 GG 的下载按钮时，content script 通知 background；background 用 `chrome.downloads`
    记下之后 15 分钟内开始的下载（`ggDownloads`：文件路径、完成 / 中断）。
 2. 侧边栏按点击时间把下载对到每条 `clicked` 记录上（`GG_LEDGER.attachDownloads`）。
-3. 每轮同步 / 补下载结束（或刚连上实时GTO 时），侧边栏 `POST /gg-bridge/v1/verify`：
+3. 每轮同步 / 补下载结束（或刚连上[实时GTO](https://www.rtgto.net) 时），侧边栏 `POST /gg-bridge/v1/verify`：
 
    ```json
    { "protocol": 1, "extensionVersion": "1.3.1", "downloadDir": "C:\\Users\\me\\Downloads",
@@ -143,22 +134,22 @@
                     "count": 95, "download": { "file": "C:\\…\\000001a0-….zip", "state": "complete" } } ] }
    ```
 
-4. 实时GTO 逐个打开文件：下完没有、能否读取、类型对不对、文件数和按钮上的条数是否一致；
+4. [实时GTO](https://www.rtgto.net) 逐个打开文件：下完没有、能否读取、类型对不对、文件数和按钮上的条数是否一致；
    导入并移动到备份目录后返回每条的 `status`（`ok` / `count_diff` / `downloading` / `interrupted` /
    `not_detected` / `file_missing` / `unreadable` / `wrong_kind`）和 `missing`（`gg-missing-ranges` 格式）。
 5. 扩展把结果写回记录（`verify` 字段），没下到的日期自动进「补下载」清单。
 
-开始同步时侧边栏会探测实时GTO 是否打开，并提示去「GG数据导入」查看核对状态。
+开始同步时侧边栏会探测[实时GTO](https://www.rtgto.net) 是否打开，并提示去「GG数据导入」查看核对状态。
 
-### 同步记录存在实时GTO 里
+### 同步记录存在[实时GTO](https://www.rtgto.net) 里
 
-每个分类（`tournament` / `rushAndCash` / `holdem` / `plo` / `battleRoyale` / `spinAndGold` / `aof` / `shortDeck`）同步到哪一天，保存在实时GTO 的牌局数据库里
-（`gg_sync_state` 表，实时GTO 侧 `gg_sync_state_store.dart`），扩展自己不存（`sync-state.js` 经 background 转发）：
+每个分类（`tournament` / `rushAndCash` / `holdem` / `plo` / `battleRoyale` / `spinAndGold` / `aof` / `shortDeck`）同步到哪一天，保存在[实时GTO](https://www.rtgto.net) 的牌局数据库里
+（`gg_sync_state` 表，[实时GTO](https://www.rtgto.net) 侧 `gg_sync_state_store.dart`），扩展自己不存（`sync-state.js` 经 background 转发）：
 
-- 实时GTO 里没有这个分类的记录 = 没同步过，从 GG 保留期的最早一天开始；
-- 在实时GTO 里清空牌局时，同步记录一起清空，下次从头同步；切换数据库、备份恢复时同步记录跟着数据库走；
-- 扩展里「清除同步记录」清的是实时GTO 里这个分类的同步记录，已导入的数据不删；
-- 连不上实时GTO（或实时GTO 太旧）时不能开始同步——不知道从哪天开始，不能当成没同步过从头重下。
+- [实时GTO](https://www.rtgto.net) 里没有这个分类的记录 = 没同步过，从 GG 保留期的最早一天开始；
+- 在[实时GTO](https://www.rtgto.net) 里清空牌局时，同步记录一起清空，下次从头同步；切换数据库、备份恢复时同步记录跟着数据库走；
+- 扩展里「清除同步记录」清的是[实时GTO](https://www.rtgto.net) 里这个分类的同步记录，已导入的数据不删；
+- 连不上[实时GTO](https://www.rtgto.net)（或[实时GTO](https://www.rtgto.net) 太旧）时不能开始同步——不知道从哪天开始，不能当成没同步过从头重下。
 
 ```
 GET  /gg-bridge/v1/sync-state  -> { "states": { "plo": { "lastSyncedDate": "2026-09-30", "lastDataSyncAt": 1790000000000, "batches": 12, "days": 90 } } }
@@ -170,10 +161,10 @@ POST /gg-bridge/v1/sync-state  { "op": "advance", "pageType": "plo", "date": "20
 ```
 
 旧版扩展把同步记录存在本地（`ggSyncState`）。升级后第一次读写同步记录前，扩展把每个分类用 `migrate`
-交给实时GTO：实时GTO 里已有这个分类的记录就以它为准，没有才接过来。全部交完才删本地这份；
+交给[实时GTO](https://www.rtgto.net)：[实时GTO](https://www.rtgto.net) 里已有这个分类的记录就以它为准，没有才接过来。全部交完才删本地这份；
 迁移失败时读同步记录报错（不能开始同步），下次再试。
 
-`advance` 只往前推、`rewind` 只往回退（实时GTO 保证）。实时GTO 的 `hello` 里 `protocol` ≥ 2 才有这组接口。
+`advance` 只往前推、`rewind` 只往回退（[实时GTO](https://www.rtgto.net) 保证）。[实时GTO](https://www.rtgto.net) 的 `hello` 里 `protocol` ≥ 2 才有这组接口。
 
 ## 技术架构
 
@@ -226,7 +217,7 @@ POST /gg-bridge/v1/sync-state  { "op": "advance", "pageType": "plo", "date": "20
 
 3. 如何查看已下载的记录？
    - 下载的记录会保存在浏览器的下载目录中
-   - 可以使用RtGTO导入，形成分析结果
+   - 可以使用[RtGTO](https://www.rtgto.net)导入，形成分析结果
 
 4. 登录失败怎么办？
    - 检查用户名和密码是否正确
@@ -267,8 +258,8 @@ python build.py
 ```
 不要用 `Compress-Archive`：它写出的 zip 路径分隔符是反斜杠，Chrome / Edge 加载会失败。
 
-实时GTO 内置了一份扩展（「GG数据导入」→「安装GG数据下载扩展」解压到 `文档\RealtimeGTO\GGDownloadExtension`）。
-更新内置版本时加 `--copy-to`，把包复制成实时GTO 仓库里的 `assets/gg_extension/gg-download-extension.zip`：
+[实时GTO](https://www.rtgto.net) 内置了一份扩展（「GG数据导入」→「安装GG数据下载扩展」解压到[实时GTO](https://www.rtgto.net) 数据目录下的 `GGDownloadExtension` 文件夹）。
+更新内置版本时加 `--copy-to`，把包复制成[实时GTO](https://www.rtgto.net) 仓库里的 `assets/gg_extension/gg-download-extension.zip`：
 ```shell
 python build.py --copy-to <实时GTO 仓库>/assets/gg_extension
 ```

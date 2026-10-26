@@ -17,8 +17,10 @@ import zipfile
 SRC = os.path.dirname(os.path.abspath(__file__))
 EXCLUDE_DIRS = {".vscode", ".git", "node_modules", "__pycache__",
                 # 开发用的检查脚本，不打进扩展包
-                "tools"}
-EXCLUDE_FILES = {"README.md", ".gitignore", ".DS_Store", "build.py",
+                "tools",
+                # README 用的截图
+                "docs"}
+EXCLUDE_FILES = {"README.md", "README.en.md", ".gitignore", ".DS_Store", "build.py",
                  # 每次打包现生成，见 write_build_info
                  "build-info.json",
                  # 给服务端参考用的规则模板，运行时不需要打进包里
