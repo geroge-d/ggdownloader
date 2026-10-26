@@ -248,7 +248,9 @@ if migration fails, reading sync state reports an error (sync can't start) and i
 
 ## License
 
-Proprietary
+This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE): free to use, modify and share for noncommercial purposes, such as personal use, study and research, and noncommercial organizations.
+
+**Commercial use requires a separate license.** Contact us through the [RtGTO](https://www.rtgto.net) website.
 
 ## Packaging
 

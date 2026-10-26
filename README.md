@@ -248,7 +248,9 @@ POST /gg-bridge/v1/sync-state  { "op": "advance", "pageType": "plo", "date": "20
 
 ## 许可证
 
-私有
+本项目采用 [PolyForm Noncommercial License 1.0.0](LICENSE)：个人、学习研究、非营利组织等非商业用途可以免费使用、修改和分发。
+
+**商业用途需要单独授权**，请通过[实时GTO](https://www.rtgto.net) 官网联系。
 
 ## 打包说明
 
