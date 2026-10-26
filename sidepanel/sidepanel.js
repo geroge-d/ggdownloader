@@ -36,6 +36,13 @@ const coverageHint = document.getElementById('coverage-hint');
 // GG 自身的下载限制（gg-limits.js，HTML 里排在本文件之前加载）
 const L = window.GG_LIMITS;
 
+// 实时GTO 里有更新的扩展时不许开始同步（旧版可能已经不认 GG 的新页面），先更新
+let extOutdated = false;
+function lockSyncIfOutdated() {
+  // 跑着的时候按钮是「停止」，不能锁
+  if (extOutdated && !isRunning) startStopBtn.disabled = true;
+}
+
 // 更新UI状态
 let wasRunning = false;
 function updateUI(status) {
@@ -55,6 +62,7 @@ function updateUI(status) {
   
   // 更新按钮状态
   pauseResumeBtn.disabled = !isRunning;
+  lockSyncIfOutdated();
   // 同步/补下载共用一个运行状态：跑着的时候不能再开补下载
   if (typeof rtgtoVerifyBtn !== 'undefined' && rtgtoVerifyBtn) {
     if (rtgtoVerifyBtn) rtgtoVerifyBtn.disabled = !rtgto.ok || rtgtoVerifying || isRunning;
@@ -561,6 +569,7 @@ function renderSyncCard(info) {
   coverageHint.innerHTML = lines.join('<br>');
   // 分类或同步进度变了，能补的范围也跟着变
   if (typeof renderRepair === 'function') renderRepair();
+  lockSyncIfOutdated();
 }
 
 // "上次数据同步"：最近一次真正下载到数据的时间（不是点击同步的时间）。
@@ -652,6 +661,7 @@ updateRulesLink && updateRulesLink.addEventListener('click', async function(e) {
 // 按钮事件监听
 startStopBtn.addEventListener('click', function() {
   if (!isRunning) {
+    if (extOutdated) return;
     statusDiv.style.color = '';
     announceRtgto();
     // 先确认 content script 真的收下了，再把按钮切成"停止"。
@@ -931,6 +941,7 @@ function syncStartWithRepair() {
       : t('up_to_date');
     syncPendingSpan.style.color = repairSegments.length ? '#fbbf24' : '#64748b';
   }
+  lockSyncIfOutdated();
 }
 
 repairImportBtn && repairImportBtn.addEventListener('click', () => repairFile.click());
@@ -1065,6 +1076,11 @@ const extUpdateBanner = document.getElementById('ext-update-banner');
 async function renderUpdateBanner() {
   if (!extUpdateBanner || !Bridge) return;
   const old = rtgto.ok ? await Bridge.outdated(rtgto.info) : null;
+  const was = extOutdated;
+  extOutdated = !!old;
+  // 刚变成"不用更新"时按当前计划把按钮恢复回来；变成"要更新"就锁上
+  if (was && !extOutdated && !isRunning) renderSyncCard(currentPlan);
+  lockSyncIfOutdated();
   if (!old) {
     extUpdateBanner.className = '';
     extUpdateBanner.innerHTML = '';
@@ -1077,7 +1093,8 @@ async function renderUpdateBanner() {
       mine: fmtBuild(old.mine), latest: fmtBuild(old.latest),
       mineVersion: old.mineVersion || '-', latestVersion: old.latestVersion || '-',
       extPage: /Edg\//.test(navigator.userAgent) ? 'edge://extensions' : 'chrome://extensions',
-    }));
+    })) +
+    `<div style="margin-top:4px">${escapeHtml(t('ext_update_blocks_sync'))}</div>`;
 }
 
 async function pingRtgto() {
