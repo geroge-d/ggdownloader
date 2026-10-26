@@ -20,7 +20,7 @@ EXCLUDE_DIRS = {".vscode", ".git", "node_modules", "__pycache__",
                 "tools",
                 # README 用的截图
                 "docs"}
-EXCLUDE_FILES = {"README.md", "README.en.md", ".gitignore", ".DS_Store", "build.py",
+EXCLUDE_FILES = {"README.md", "README.zh-CN.md", ".gitignore", ".DS_Store", "build.py",
                  # 每次打包现生成，见 write_build_info
                  "build-info.json",
                  # 给服务端参考用的规则模板，运行时不需要打进包里
