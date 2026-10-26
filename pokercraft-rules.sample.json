@@ -1,6 +1,6 @@
 {
-  "version": 6,
-  "updatedAt": "2026-09-24",
+  "version": 7,
+  "updatedAt": "2026-10-26",
   "note": "Angular Material MDC (v15+/v19)",
   "pageTypes": {
     "tournament": "my\\.pokercraft\\.com/tournament",
@@ -125,6 +125,46 @@
       "no data",
       "无数据",
       "無數據"
+    ],
+    "runningLabels": [
+      "Running",
+      "运行",
+      "運行",
+      "進行中",
+      "진행 중",
+      "В процессе",
+      "En curso",
+      "A decorrer",
+      "Läuft",
+      "En cours d'exécution",
+      "รันนิ่ง",
+      "Đang chạy",
+      "Berjalan",
+      "Devam ediyor",
+      "Fut/Futó",
+      "Spuštěno",
+      "În desfășurare",
+      "Kører",
+      "Käib",
+      "Käynnissä",
+      "Pågår",
+      "Vyksta",
+      "Notiekošie",
+      "الجري",
+      "در حال دویدن",
+      "Ընթացքի մեջ"
+    ],
+    "prizeCell": [
+      "td.cdk-column-TournamentPrize",
+      "td.mat-column-TournamentPrize"
+    ],
+    "durationCell": [
+      "td.cdk-column-Duration",
+      "td.mat-column-Duration"
+    ],
+    "rankCell": [
+      "td.cdk-column-Rank",
+      "td.mat-column-Rank"
     ],
     "limitErrorLabels": [
       "超过允许的最大数量",

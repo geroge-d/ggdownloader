@@ -107,6 +107,16 @@
     return set;
   }
 
+  /**
+   * 一条记录真正下齐了的日期：有比赛还没打完的记录只算到 runningFrom 前一天
+   * （runningFrom 不晚于 from 时一天都不算），那几天要等比赛结束后重下。
+   */
+  function settledSpan(e) {
+    if (!e.runningFrom || !e.from || e.runningFrom > e.to) return e;
+    if (e.runningFrom <= e.from) return { from: null, to: null };
+    return { from: e.from, to: fromDay(toDay(e.runningFrom) - 1) };
+  }
+
   /** 天的集合合并回连续区间 */
   function toRanges(set) {
     const days = [...set].sort((a, b) => a - b);
@@ -128,7 +138,8 @@
 
     /**
      * 追加一条记录。必填：pageType, kind, from, to, status。
-     * 其余字段（runId, batch, count, rows, chunk, rowRange, availableFrom, settled, note）可选。
+     * 其余字段（runId, batch, count, rows, chunk, rowRange, availableFrom, settled, runningFrom, note）可选。
+     * runningFrom：这天起有比赛还没打完（照样下载了，但数据不全），这条记录只算覆盖了它之前的日期。
      */
     add(entry) {
       const rec = Object.assign(
@@ -147,6 +158,7 @@
           rowRange: null,
           availableFrom: null,
           settled: null,
+          runningFrom: null,
           note: "",
         },
         entry,
@@ -256,8 +268,8 @@
           const failed = mine.filter((e) => effectiveStatus(e) === "failed");
           const allClicked = mine.filter((e) => e.status === "clicked");
 
-          const clickedDays = daySet(clicked);
-          const coveredDays = daySet(clicked.concat(noData));
+          const clickedDays = daySet(clicked.map(settledSpan));
+          const coveredDays = daySet(clicked.map(settledSpan).concat(noData));
           // 没下到的日期。分趟下载的每一趟只下了其中几行，记录上的日期却是整段：
           // 某一趟下到了不能算别的趟也下到了（不管是不是同一次同步）——以前兄弟趟、
           // 甚至上一次同步的某一趟都会把缺的那一趟"覆盖"掉，补下载的一趟被取消了照样显示完成。
@@ -453,7 +465,7 @@
 
     CSV_COLUMNS: [
       "at", "mode", "runId", "batch", "pageType", "kind", "from", "to", "status",
-      "count", "rows", "chunk", "rowRange", "availableFrom", "settled", "note",
+      "count", "rows", "chunk", "rowRange", "availableFrom", "settled", "runningFrom", "note",
       "id", "clickedAt", "downloadState", "downloadFile", "verifyStatus", "verifyDetail",
     ],
 

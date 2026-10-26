@@ -20,8 +20,8 @@
   "use strict";
 
   const DEFAULT_RULES = {
-    version: 6,
-    updatedAt: "2026-09-24",
+    version: 7,
+    updatedAt: "2026-10-26",
     note: "Angular Material MDC (v15+/v19)",
 
     // 页面类型识别：正则字符串（不带斜杠），对 location.href 匹配
@@ -117,6 +117,20 @@
       sessionsScope: ["app-sessions", ".table-wrapper"],
       spinner: ["app-page-spinner#session-spinner", "app-page-spinner", ".page-spinner"],
       noDataLabels: ["没有数据", "沒有數據", "no data", "无数据", "無數據"],
+
+      // —— 还没打完的比赛 ——
+      // 锦标赛列表"奖金"一列，没打完的比赛显示"运行"/"Running"（文案取自 PokerCraft 各语言的翻译，
+      // my.pokercraft.com/assets/i18n/<lang>.json 的 Running），时长和名次两列都是"-"。
+      // 这种比赛照样能下概要和手牌，但数据不全，同步记录不能越过它的那一天。
+      runningLabels: [
+        "Running", "运行", "運行", "進行中", "진행 중", "В процессе", "En curso", "A decorrer",
+        "Läuft", "En cours d'exécution", "รันนิ่ง", "Đang chạy", "Berjalan", "Devam ediyor",
+        "Fut/Futó", "Spuštěno", "În desfășurare", "Kører", "Käib", "Käynnissä", "Pågår",
+        "Vyksta", "Notiekošie", "الجري", "در حال دویدن", "Ընթացքի մեջ",
+      ],
+      prizeCell: ["td.cdk-column-TournamentPrize", "td.mat-column-TournamentPrize"],
+      durationCell: ["td.cdk-column-Duration", "td.mat-column-Duration"],
+      rankCell: ["td.cdk-column-Rank", "td.mat-column-Rank"],
 
       // —— 选中数量超限 ——
       // GG 对"一次能选多少场"有上限，超了会在页面上弹提示并拒绝下载。

@@ -763,6 +763,11 @@ async function learnHandsPerRow(pageType) {
 
 // 同步中途因页面异常中止时的原因：有它就不进核对阶段，状态停在这条提示上
 let loopAbortMessage = null;
+// 这次同步碰到的还没打完的比赛里最早的那天（YYYY-MM-DD）。那场比赛照样下载，
+// 但数据不全：同步记录停在它前一天，下次同步从这天起重下
+let syncRunningFrom = null;
+// 开始超过这么多天还显示"运行"的比赛不再拦同步记录（多日赛一般一两周内打完）
+const RUNNING_MAX_DAYS = 30;
 
 /**
  * 按下载记录把同步记录推进到连续覆盖到的最后一天（不超过 syncTo）。
@@ -804,6 +809,17 @@ async function advanceWatermarkByLedgerOnce(pageType, syncTo, why) {
     days(c && c.pending, (d) => set.delete(d));
     return set;
   };
+  // 有比赛还没打完的那天：以后没有一条不带 runningFrom 的新记录（比赛结束后重下的）盖过它，就不能越过。
+  // 只看 settledSpan 不够：那天要是还有更早的、不带 runningFrom 的旧记录，照样算"下过"
+  const recentMs = Date.now() - RUNNING_MAX_DAYS * L.MS_PER_DAY;
+  let runningStop = null;
+  for (const r of list) {
+    if (r.pageType !== pageType || !r.runningFrom || r.runningFrom <= from || r.runningFrom > syncTo) continue;
+    if (L.parse(r.runningFrom).getTime() < recentMs) continue;
+    const redone = list.some((x) => x.pageType === pageType && x.kind === r.kind && !x.runningFrom &&
+      x.status === 'clicked' && x.at > r.at && x.from <= r.runningFrom && x.to >= r.runningFrom);
+    if (!redone && (!runningStop || r.runningFrom < runningStop)) runningStop = r.runningFrom;
+  }
   const cfg = currentPageConfig();
   const summaryDays = cfg.hasSummary ? covered('summary') : null;
   const historyDays = covered('history');
@@ -811,6 +827,7 @@ async function advanceWatermarkByLedgerOnce(pageType, syncTo, why) {
   let last = from;
   for (let t = L.parse(from).getTime() + L.MS_PER_DAY; t <= L.parse(syncTo).getTime(); t += L.MS_PER_DAY) {
     const d = L.fmt(new Date(t));
+    if (runningStop && d >= runningStop) break;
     const okSummary = !summaryDays || summaryDays.has(d);
     const okHistory = t < earliestHistory || historyDays.has(d);
     if (!okSummary || !okHistory) break;
@@ -827,6 +844,7 @@ async function advanceWatermarkByLedgerOnce(pageType, syncTo, why) {
 async function runAutomation() {
   runStats = newRunStats(currentPageType());
   loopAbortMessage = null;
+  syncRunningFrom = null;
   pendingStarts.length = 0;   // 上一次同步遗留的等待记录不算
   if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
   try {
@@ -856,6 +874,14 @@ async function runAutomation() {
       await advanceWatermarkByLedger(pageType, syncTo, '实时GTO 已确认完整');
       // 下过的都齐了，但同步记录没到终点：说明中间有日期根本没下（不是没下到），不能说全部完成
       const reached = await GG_SYNC.get(pageType).then(s => s.lastSyncedDate, () => currentStatus.lastSyncedDate);
+      const nextDay = reached && L.fmt(new Date(L.parse(reached).getTime() + L.MS_PER_DAY));
+      if (syncTo && reached && reached < syncTo && syncRunningFrom && syncRunningFrom === nextDay) {
+        const message = `已下载的都核对完整；${syncRunningFrom} 有比赛还没打完，同步记录停在 ${reached}，` +
+          `等比赛结束后再点开始同步，会从 ${syncRunningFrom} 起重新下载`;
+        logSuccess(message, "runAutomation");
+        updateStatus("success", message);
+        return;
+      }
       if (syncTo && reached && reached < syncTo) {
         const next = L.fmt(new Date(L.parse(reached).getTime() + L.MS_PER_DAY));
         const message = `已下载的都核对完整，但 ${next} 起还没有下载，同步记录停在 ${reached}，再点一次开始同步会从那里继续`;
@@ -2440,6 +2466,8 @@ async function loopDownload(opts = {}) {
   // 一旦有批次失败，后面即使成功也不能再推进水位线，
   // 否则失败的那几天会被永久跳过，下次同步也补不回来。
   let contiguous = true;
+  // 碰到还没打完的比赛后，后面的批次照样下载，但同步记录不再往前推（停在那场比赛的前一天）
+  let runningHold = null;
 
   // 连续失败保护：元素找不到时游标照样往前推（否则死循环），
   // 但连着失败多次说明页面结构真的不对了，继续跑只会白白跳过数据。
@@ -2721,6 +2749,7 @@ async function loopDownload(opts = {}) {
     let batchRows = 0;
     let batchSummary = 0;
     let batchHistory = 0;
+    let batchRunningFrom = null;   // 本批里还没打完的比赛最早的那天
 
     // 下载记录的公共部分。rows 在判空/全选之后才知道，所以每次现取。
     const batchRec = () => ({
@@ -2733,6 +2762,8 @@ async function loopDownload(opts = {}) {
       rows: batchRows || null,
       summaryFrom: L.fmt(earliestSummary),
       historyFrom: L.fmt(earliestHistory),
+      // 这天起的数据不全（有比赛还没打完）：按下载记录推进同步记录时只算它之前的日期
+      runningFrom: batchRunningFrom,
     });
     // 这一批按 GG 的限制"应该有"哪几类数据：概要只有锦标赛类（MTT / 神秘大逃杀 / 黄金转盘）有且回溯 12 个月，手牌只回溯 3 个月
     const expectedKinds = () => {
@@ -2817,6 +2848,30 @@ async function loopDownload(opts = {}) {
       if (repair) return;
       if (!contiguous) {
         logWarning(`本批成功但前面有批次失败，暂不推进同步记录（仍停在失败点之前）`, "loopDownload");
+        return;
+      }
+      if (runningHold) {
+        log(`${runningHold} 有比赛还没打完，本批下载了但不推进同步记录`, "loopDownload");
+        return;
+      }
+      if (batchRunningFrom) {
+        // 已经结束的那几天照常推进；没打完的那天起不推进，下次同步从那天起重下
+        runningHold = batchRunningFrom;
+        const keep = L.fmt(new Date(L.parse(batchRunningFrom).getTime() - L.MS_PER_DAY));
+        if (batchRunningFrom < startStr) {
+          // 那场比赛开始在上一批的日期里，上一批已经推过去了：退回它前一天
+          await GG_SYNC.rewind(pageType, keep);
+          currentStatus.lastSyncedDate = keep;
+        } else if (keep >= startStr) {
+          await GG_SYNC.advance(pageType, keep, { batches: 1, days: L.diffDays(L.parse(keep), roundStart) + 1, downloaded: !!downloaded });
+          currentStatus.lastSyncedDate = keep;
+          committedThisBatch = true;
+        }
+        logWarning(
+          `${batchRunningFrom} 有比赛还没打完：已下载的照样保留，同步记录停在 ${committedThisBatch || batchRunningFrom < startStr ? keep : '原处'}，` +
+          `比赛结束后再同步会从 ${batchRunningFrom} 起重下`,
+          "loopDownload"
+        );
         return;
       }
       await GG_SYNC.advance(pageType, endStr, { batches: 1, days: batchDays, downloaded: !!downloaded });
@@ -3196,6 +3251,22 @@ async function loopDownload(opts = {}) {
         }
       }
       batchRows = rowCount;
+      // 还没打完的比赛（奖金列写着"运行"/"Running"）：照样下载概要和手牌，但同步记录不能越过它那天
+      // 补下载也要认：它的下载记录要带上 runningFrom，否则按下载记录推进同步记录时会越过那天
+      {
+        const all = D.runningRowDates(roundStart);
+        // 开始超过 RUNNING_MAX_DAYS 天还显示"运行"的，多半是 GG 那边卡住了：不再拦同步记录，免得永远卡在那天
+        const running = all.filter((d) => Date.now() - d.getTime() <= RUNNING_MAX_DAYS * L.MS_PER_DAY);
+        if (running.length < all.length) {
+          logWarning(`有 ${all.length - running.length} 场比赛开始超过 ${RUNNING_MAX_DAYS} 天仍显示还没打完，当作已结束`, "loopDownload");
+        }
+        if (running.length) {
+          // 不截到本批起点：比本批早一天的（时区、跨批的多日赛）也算，同步记录要退回它前一天
+          batchRunningFrom = L.fmt(new Date(Math.min(...running.map((d) => d.getTime()))));
+          if (!syncRunningFrom || batchRunningFrom < syncRunningFrom) syncRunningFrom = batchRunningFrom;
+          log(`本批有 ${running.length} 场比赛还没打完（最早 ${batchRunningFrom}），照样下载，同步记录不越过这天`, "loopDownload");
+        }
+      }
       if (confirmingEmpty) {
         logWarning(`重查出现 ${rowCount} 行：刚才的空结果其实是加载失败，幸好没有跳过`, "loopDownload");
         confirmingEmpty = false;
@@ -3423,7 +3494,13 @@ async function loopDownload(opts = {}) {
     return { ok };
   }
   const finalState = await GG_SYNC.get(pageType).catch(() => ({ lastSyncedDate: currentStatus.lastSyncedDate }));
-  if (contiguous) {
+  if (contiguous && runningHold) {
+    logSuccess(
+      `同步完成：${plan.from} ~ ${plan.to}，共 ${syncedBatches} 批 ${doneDays} 天。` +
+      `${runningHold} 有比赛还没打完，同步记录停在 ${finalState.lastSyncedDate || '(未推进)'}，比赛结束后再同步会从 ${runningHold} 起重下`,
+      "loopDownload"
+    );
+  } else if (contiguous) {
     logSuccess(
       `同步完成：${plan.from} ~ ${plan.to}，共 ${syncedBatches} 批 ${doneDays} 天。` +
       `下次将从 ${finalState.lastSyncedDate || plan.from} 的第二天继续`,

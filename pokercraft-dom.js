@@ -637,27 +637,71 @@
   function rowDates(ref) {
     const scope = qsAny(R("sessionsScope"));
     if (!scope) return [];
-    const refMs = ref ? ref.getTime() : Date.now();
-    const refYear = new Date(refMs).getFullYear();
     const out = [];
     scope.querySelectorAll("tbody tr").forEach((tr) => {
-      const cells = tr.querySelectorAll("td");
-      const text = ((cells[1] || cells[0] || tr).textContent || "") + " " + (tr.textContent || "").slice(0, 80);
-      let y = null, mo = null, d = null, m;
-      if ((m = text.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/))) { y = +m[1]; mo = +m[2] - 1; d = +m[3]; }
-      else if ((m = text.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})\b/i))) { mo = MONTHS[m[1].slice(0, 3).toLowerCase()]; d = +m[2]; }
-      else if ((m = text.match(/(\d{1,2})月(\d{1,2})日/))) { mo = +m[1] - 1; d = +m[2]; }
-      if (mo == null || !d) return;
-      if (y == null) {
-        let best = null;
-        for (const yy of [refYear - 1, refYear, refYear + 1]) {
-          const t = new Date(yy, mo, d).getTime();
-          if (best == null || Math.abs(t - refMs) < Math.abs(best - refMs)) best = t;
-        }
-        out.push(new Date(best));
-      } else {
-        out.push(new Date(y, mo, d));
+      const d = rowDate(tr, ref);
+      if (d) out.push(d);
+    });
+    return out;
+  }
+
+  /** 一行的开始日期，解析不了返回 null。 */
+  function rowDate(tr, ref) {
+    const refMs = ref ? ref.getTime() : Date.now();
+    const refYear = new Date(refMs).getFullYear();
+    const cells = tr.querySelectorAll("td");
+    const text = ((cells[1] || cells[0] || tr).textContent || "") + " " + (tr.textContent || "").slice(0, 80);
+    let y = null, mo = null, d = null, m;
+    if ((m = text.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/))) { y = +m[1]; mo = +m[2] - 1; d = +m[3]; }
+    else if ((m = text.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})\b/i))) { mo = MONTHS[m[1].slice(0, 3).toLowerCase()]; d = +m[2]; }
+    else if ((m = text.match(/(\d{1,2})月(\d{1,2})日/))) { mo = +m[1] - 1; d = +m[2]; }
+    if (mo == null || !d) return null;
+    if (y != null) return new Date(y, mo, d);
+    let best = null;
+    for (const yy of [refYear - 1, refYear, refYear + 1]) {
+      const t = new Date(yy, mo, d).getTime();
+      if (best == null || Math.abs(t - refMs) < Math.abs(best - refMs)) best = t;
+    }
+    return new Date(best);
+  }
+
+  /** 单元格自己的文字（不含窄屏时塞在里面的 <ul class="description"> 摘要）。 */
+  function ownText(cell) {
+    if (!cell) return "";
+    return Array.from(cell.childNodes)
+      .filter((n) => n.nodeType === 3 || (n.nodeType === 1 && n.tagName !== "UL"))
+      .map((n) => n.textContent || "").join(" ");
+  }
+
+  // 时长、名次都是"-"、但奖金列不认识的那种行，只在最近这几天里才当成还在打：
+  // 文案对不上（GG 新加了语言、改了翻译）时靠它兜底，又不至于让某场早结束的怪行把同步记录永远卡住
+  const RUNNING_DASH_MAX_DAYS = 14;
+
+  /**
+   * 列表里还没打完的比赛（锦标赛"奖金"列写着"运行"/"Running"……）的开始日期。
+   * 认法：奖金列文案等于 runningLabels 之一（不分语言，PokerCraft 的全部翻译都在规则里）；
+   * 或者时长、名次两列都没有数字（没打完的比赛这两列是"-"），且是最近 RUNNING_DASH_MAX_DAYS 天的。
+   * 没有这几列的页面（现金局等）返回空数组。
+   */
+  function runningRowDates(ref) {
+    const scope = qsAny(R("sessionsScope"));
+    if (!scope) return [];
+    const labels = R("runningLabels").map(norm).filter(Boolean);
+    const out = [];
+    scope.querySelectorAll("tbody tr").forEach((tr) => {
+      // 奖金列认文案；没有奖金列的页面（神秘大逃杀、黄金转盘可能不一样）只靠时长、名次两列兜底
+      const prize = qsAny(R("prizeCell"), tr);
+      const byLabel = !!prize && labels.includes(norm(ownText(prize)));
+      let byDash = false;
+      if (!byLabel) {
+        const dur = qsAny(R("durationCell"), tr), rank = qsAny(R("rankCell"), tr);
+        byDash = !!dur && !!rank && !/\d/.test(ownText(dur)) && !/\d/.test(ownText(rank));
       }
+      if (!byLabel && !byDash) return;
+      const d = rowDate(tr, ref);
+      if (!d) return;
+      if (!byLabel && Date.now() - d.getTime() > RUNNING_DASH_MAX_DAYS * 86400000) return;
+      out.push(d);
     });
     return out;
   }
@@ -869,6 +913,7 @@
     selectFirstRows,
     selectAllState,
     rowDates,
+    runningRowDates,
     clearSelection,
     // 下载
     findSummaryButton,

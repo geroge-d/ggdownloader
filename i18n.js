@@ -226,6 +226,7 @@ const I18N = {
     ledger_interrupted: "下载中断 {n}",
     ledger_unverified: "待核对 {n}",
     notice_7: "7. 网络中断时下载可能静默失败。请在本机打开实时GTO的「GG数据导入」页，扩展会自动交给它核实下载完整性，漏下的部分会出现在补下载里。",
+    notice_8: "8. 还在进行中的比赛（列表里显示“运行”）也会下载概要和手牌，但同步进度停在它开始的前一天；比赛结束后再同步，会从那天起重新下载完整数据。",
     // ... 其他key
   },
   en: {
@@ -456,6 +457,7 @@ const I18N = {
     ledger_interrupted: "interrupted {n}",
     ledger_unverified: "unchecked {n}",
     notice_7: "7. Downloads can fail silently when the network drops. Open GG data import in RtGTO on this computer; the extension hands it every download to verify, and anything missing shows up under re-download.",
+    notice_8: "8. Tournaments still running are downloaded too (summary and hands so far), but sync progress stops the day before they started; sync again after they finish to re-download the complete data from that day.",
     title: "GGPoker Record Download",
   }
 };
