@@ -2081,7 +2081,7 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
     const limit = D.findLimitError();
     if (limit || D.findLimitDialog()) {
       logWarning(`勾第 ${from + 1}-${to} 行后出现"下载限制"：概要 ${s} / 手牌 ${h}，表头 ${D.selectAllState()}`, "limit");
-      await dismissLimitDialog("分趟勾选后");
+      await dismissLimitDialog("分趟勾选后", true);
     }
     return { ok: true, sCount: s, hCount: h, limit: limit || null };
   };
@@ -2230,17 +2230,17 @@ function saveLearnedCap(value) {
  *
  * 所以每批开工前、以及每次检测到超限之后，都要先把它清掉。
  */
-async function dismissLimitDialog(when) {
-  const dlg = D.findLimitDialog();
+async function dismissLimitDialog(when, expected = false) {
+  // 超限文字往往比弹窗容器先被查到（弹窗还在入场），已经知道超限了就等它冒出来再关，
+  // 否则这次直接返回、弹窗留在页面上
+  const dlg = expected ? await D.waitFor(() => D.findLimitDialog(), 3000, 200) : D.findLimitDialog();
   if (!dlg) return false;
 
   logWarning(`检测到"下载限制"弹窗（${when}）：${dlg.text.slice(0, 80)}`, "limit");
-  const how = D.closeLimitDialog();
-  await wait(randomBetween(500, 900));
-
-  // 关不掉就再试一次遮罩/Esc，实在不行只能如实告知
-  if (D.findLimitDialog()) {
-    D.closeOverlay();
+  // 入场动画没走完时点关闭可能没反应，所以多试几次、轮换关闭按钮 / Esc / 遮罩
+  let how = "";
+  for (let attempt = 0; attempt < 6 && D.findLimitDialog(); attempt++) {
+    how = D.closeLimitDialog(attempt);
     await wait(randomBetween(500, 900));
   }
   if (D.findLimitDialog()) {
@@ -3361,7 +3361,7 @@ async function loopDownload(opts = {}) {
       const limitErr = D.findLimitError();
       if (limitErr) {
         logWarning(`页面提示：${limitErr.text}`, "limit");
-        await dismissLimitDialog("超限提示后");
+        await dismissLimitDialog("超限提示后", true);
         if (limitErr.max && (!learnedCap || limitErr.max < learnedCap)) {
           await rememberCap(limitErr.max);
           logWarning(

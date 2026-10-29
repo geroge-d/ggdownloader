@@ -405,22 +405,70 @@
     return null;
   }
 
-  /** 关掉"下载限制"弹窗：先找关闭按钮，再退回遮罩/Esc。 */
-  function closeLimitDialog() {
+  /**
+   * 弹窗右上角的 ×。先按长相找（aria-label / × 字符 / close 图标 / class 带 close），
+   * 再退回规则里的选择器 —— 规则里有 "mat-dialog-container button" 这种泛的，可能先命中别的按钮。
+   */
+  function findLimitDialogCloseButton(scope) {
+    const cands = Array.from(
+      scope.querySelectorAll("button, [role='button'], [mat-dialog-close], mat-icon, svg, i, span, div, img")
+    );
+    const looksLikeClose = (el) => {
+      if (el.hasAttribute("mat-dialog-close")) return true;
+      const aria = (el.getAttribute("aria-label") || el.getAttribute("title") || "").toLowerCase();
+      if (/close|关闭|關閉/.test(aria)) return true;
+      const cls = String(el.getAttribute("class") || "").toLowerCase();
+      if (/(^|[\s_-])close([\s_-]|$)/.test(cls)) return true;
+      if (el.children.length === 0 && /^(×|✕|✖|x|close)$/i.test(el.textContent.trim())) return true;
+      return false;
+    };
+    for (const el of cands) {
+      if (!isVisible(el) || !looksLikeClose(el)) continue;
+      // 命中的是图标就点它所在的按钮
+      return el.closest("button, [role='button']") || el;
+    }
+    return qsAny(R("limitDialogClose"), scope);
+  }
+
+  /** 派发一次完整点击。svg 之类的元素没有 .click()，直接调会抛异常。 */
+  function dispatchClick(el) {
+    for (const type of ["mousedown", "mouseup", "click"]) {
+      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    }
+  }
+
+  /**
+   * 关掉"下载限制"弹窗。attempt 从 0 开始，每次换一种办法：
+   * 关闭按钮 → Esc → 点遮罩，轮着来。
+   * Esc 要发到 body 上：CDK 的键盘监听挂在 body，发给 document 它收不到。
+   */
+  function closeLimitDialog(attempt = 0) {
     const dlg = findLimitDialog();
     if (!dlg) return "no-dialog";
 
-    const btn = qsAny(R("limitDialogClose"), dlg.element) || qsAny(R("limitDialogClose"));
-    if (btn) {
-      btn.click();
-      return "close-button";
+    const way = attempt % 3;
+    if (way === 0) {
+      const btn = findLimitDialogCloseButton(dlg.element);
+      if (btn) {
+        dispatchClick(btn);
+        return "close-button";
+      }
     }
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true })
-    );
+    if (way <= 1) {
+      const target = dlg.element.querySelector("mat-dialog-container") || dlg.element;
+      for (const el of [target, document.body]) {
+        el.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", code: "Escape", keyCode: 27, bubbles: true })
+        );
+      }
+      if (way === 1) return "escape";
+    }
     const backdrop = findOverlayBackdrop();
-    if (backdrop) backdrop.click();
-    return "escape/backdrop";
+    if (backdrop) {
+      dispatchClick(backdrop);
+      return "backdrop";
+    }
+    return "escape";
   }
 
   /**
