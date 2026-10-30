@@ -2164,7 +2164,7 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
       const text = `${startStr}（第 ${round} 趟，第 ${from + 1}-${to} 行）`;
       // 同一段日期拆成几趟：记录里标上第几趟、哪几行、这一趟的行数（学每行手数时要用）
       const chunkRec = rec && Object.assign({}, rec, {
-        chunk: String(round), rowRange: `${from + 1}-${to}`, rows, rowsExact: true,
+        chunk: String(round), rowRange: `${from + 1}-${to}`, rows, rowsExact: true, chunkOf: total,
       });
       const reselect = () => pick(from, to);
       if (wantS) {
@@ -2200,6 +2200,13 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
     if (doHistory && !(await pass(false, true, '手牌'))) { chunkFailedKinds = ['history']; return false; }
   }
   D.clearSelection();
+  // 整组下完了，这几趟的记录才算下过这段日期（没走完的一组按下载记录推进同步日期时不算）
+  if (GG_LEDGER && rec) {
+    const same = (e) => e.chunkOf && e.runId === rec.runId && e.batch === rec.batch && e.pageType === rec.pageType &&
+      e.from === rec.from && e.to === rec.to;
+    await GG_LEDGER.update((list) => list.map((e) => same(e) ? Object.assign({}, e, { chunkDone: true }) : e))
+      .catch((e) => console.error('[GGPoker助手] 写下载记录失败', e));
+  }
   logSuccess(`${startStr} ~ ${endStr} 分 ${round} 趟下载完成`, "chunk");
   return true;
 }

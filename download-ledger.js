@@ -138,7 +138,8 @@
 
     /**
      * 追加一条记录。必填：pageType, kind, from, to, status。
-     * 其余字段（runId, batch, count, rows, chunk, rowRange, availableFrom, settled, runningFrom, note）可选。
+     * 其余字段（runId, batch, count, rows, chunk, rowRange, chunkOf, chunkDone, availableFrom, settled, runningFrom, note）可选。
+     * chunkOf：分趟下载时这一组共几行；chunkDone：整组每一趟都下完了（没有它，这一趟不算下过这段日期）。
      * runningFrom：这天起有比赛还没打完（照样下载了，但数据不全），这条记录只算覆盖了它之前的日期。
      */
     add(entry) {
@@ -263,7 +264,9 @@
         for (const kind of KINDS) {
           const mine = list.filter((e) => e.pageType === pageType && e.kind === kind);
           if (!mine.length) continue;
-          const clicked = mine.filter((e) => effectiveStatus(e) === "clicked");
+          // 分趟下载的一组没走完（中途停了、页面关了）：每一趟只下了其中几行，记录上的日期却是整段，
+          // 不能算这段日期下过 —— 整组下完才会给每一趟补上 chunkDone。旧记录没有 chunkOf，照旧算
+          const clicked = mine.filter((e) => effectiveStatus(e) === "clicked" && !(e.chunkOf && !e.chunkDone));
           const noData = mine.filter((e) => e.status === "no_data");
           const failed = mine.filter((e) => effectiveStatus(e) === "failed");
           const allClicked = mine.filter((e) => e.status === "clicked");
@@ -465,7 +468,7 @@
 
     CSV_COLUMNS: [
       "at", "mode", "runId", "batch", "pageType", "kind", "from", "to", "status",
-      "count", "rows", "chunk", "rowRange", "availableFrom", "settled", "runningFrom", "note",
+      "count", "rows", "chunk", "rowRange", "chunkOf", "chunkDone", "availableFrom", "settled", "runningFrom", "note",
       "id", "clickedAt", "downloadState", "downloadFile", "verifyStatus", "verifyDetail",
     ],
 
