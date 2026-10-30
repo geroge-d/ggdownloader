@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GGPoker记录下载助手",
-  "version": "1.3.7",
+  "version": "1.3.8",
   "description": "方便GGPoker用户下载每场游戏概要信息和历史手牌记录。",
   "icons": {
     "16": "icons/icon16.png",

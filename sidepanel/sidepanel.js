@@ -9,7 +9,6 @@ const syncPageTypeSpan = document.getElementById('sync-page-type');
 const syncBadgeSpan = document.getElementById('sync-badge');
 const syncWatermarkSpan = document.getElementById('sync-watermark');
 const syncPendingSpan = document.getElementById('sync-pending');
-const syncLastRunSpan = document.getElementById('sync-last-run');
 const clearSyncBtn = document.getElementById('clear-sync-btn');
 const copyLogBtn = document.getElementById('copy-log-btn');
 const rulesInfoSpan = document.getElementById('rules-info');
@@ -508,7 +507,6 @@ function renderSyncCard(info) {
     syncBadgeSpan.textContent = t('badge_unknown');
     syncBadgeSpan.style.background = '#334155';
     syncWatermarkSpan.textContent = '—';
-    syncLastRunSpan.textContent = '—';
     syncPendingSpan.textContent = '—';
     coverageHint.innerHTML = '';
     startStopBtn.disabled = true;
@@ -527,7 +525,6 @@ function renderSyncCard(info) {
   if (info.syncError) {
     const outdated = info.syncError.code === 'rtgto_outdated';
     syncWatermarkSpan.textContent = t(outdated ? 'sync_state_rtgto_outdated' : 'sync_state_no_rtgto');
-    syncLastRunSpan.textContent = '—';
     syncPendingSpan.textContent = '—';
     syncPendingSpan.style.color = '#64748b';
     coverageHint.innerHTML = `<span style="color:#f87171;">● ${escapeHtml(t(outdated ? 'sync_state_rtgto_outdated_hint' : 'sync_state_no_rtgto_hint'))}</span>`;
@@ -537,8 +534,6 @@ function renderSyncCard(info) {
   }
 
   syncWatermarkSpan.textContent = saved.lastSyncedDate || t('never_synced');
-  // 只看"真正下载了数据"的时间。旧版本记录的 lastRunAt 混着点击同步的时间，不再使用。
-  renderLastRun(saved.lastDataSyncAt, !!saved.lastSyncedDate);
 
   if (plan.nothingToDo) {
     syncPendingSpan.textContent = t('up_to_date');
@@ -570,30 +565,6 @@ function renderSyncCard(info) {
   // 分类或同步进度变了，能补的范围也跟着变
   if (typeof renderRepair === 'function') renderRepair();
   lockSyncIfOutdated();
-}
-
-// "上次数据同步"：最近一次真正下载到数据的时间（不是点击同步的时间）。
-// 绝对时间用本地时区，相对时间让人一眼看出离上次拿到新数据过了多久。
-function renderLastRun(ts, hasWatermark) {
-  if (!ts) {
-    // 有水位线但没时间：是旧版本同步的，那时还没记录这个字段
-    syncLastRunSpan.textContent = hasWatermark ? '—' : t('never_synced');
-    return;
-  }
-  const d = new Date(ts);
-  const p = (n) => String(n).padStart(2, '0');
-  const abs = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-  syncLastRunSpan.innerHTML = `${escapeHtml(abs)}<span class="ago">${escapeHtml(timeAgo(ts))}</span>`;
-}
-
-function timeAgo(ts) {
-  const sec = Math.max(0, Math.round((Date.now() - ts) / 1000));
-  if (sec < 60) return t('ago_just_now');
-  const min = Math.round(sec / 60);
-  if (min < 60) return t('ago_minutes', { n: min });
-  const hr = Math.round(min / 60);
-  if (hr < 24) return t('ago_hours', { n: hr });
-  return t('ago_days', { n: Math.round(hr / 24) });
 }
 
 // 向页面要一份最新的同步计划（页面类型、水位线、本次待同步区间）
