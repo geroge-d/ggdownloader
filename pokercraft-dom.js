@@ -572,9 +572,11 @@
   function clearSelection() {
     const rows = findRowCheckboxes().filter((b) => b.tagName === "INPUT");
     const header = findSelectAllCheckbox();
-    // 只在每一行都勾着时才点表头取消全选：只勾了一部分时点表头会变成"全选"，
-    // 勾上几百行超过 500 就弹"下载限制"遮罩
-    if (header && header.tagName === "INPUT" && header.checked && rows.length && rows.every((b) => b.checked)) {
+    // 只在全选时才点表头取消：只勾了一部分时点表头会变成"全选"，勾上几百行超过 500 就弹"下载限制"遮罩。
+    // "全选"有两种样子：每一行都勾着；或者表头 checked 且不是半选 —— 下载完 GG 会把行上的勾去掉，
+    // 表头和它内部的选中却还是全部，这时只点行清不掉，下一趟又会把全部行再下一遍
+    const allByHeader = header && header.tagName === "INPUT" && header.checked && !header.indeterminate;
+    if (allByHeader || (header && header.tagName === "INPUT" && header.checked && rows.length && rows.every((b) => b.checked))) {
       header.click();
     }
     findRowCheckboxes().forEach((b) => {

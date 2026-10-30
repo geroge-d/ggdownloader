@@ -2053,11 +2053,18 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
 
   // 勾第 from..to-1 行，等按钮上的数字稳定下来再读
   const pick = async (from, to) => {
-    D.clearSelection();
-    await wait(randomBetween(300, 600));
-    const left = D.downloadCount(D.findSummaryButton());
+    // 清不掉就不能往下勾：剩下的已选行会跟着这一趟一起下，每趟都把整段重下一遍
+    let left = 0;
+    for (let t = 0; t < 3; t++) {
+      D.clearSelection();
+      await wait(randomBetween(300, 600) + t * 500);
+      left = D.downloadCount(D.findSummaryButton()) || D.downloadCount(D.findHistoryButton());
+      if (!left) break;
+      logWarning(`清空勾选后按钮仍是 ${left} 条（表头 ${D.selectAllState()}），第 ${t + 1} 次没清掉`, "chunk");
+    }
     if (left > 0) {
-      logWarning(`清空勾选后概要按钮仍是 ${left} 条（表头 ${D.selectAllState()}），可能有看不见的已选行`, "chunk");
+      logWarning(`勾选清不掉（仍有 ${left} 条已选），放弃分批，免得每趟都把整段重下一遍`, "chunk");
+      return { ok: false };
     }
     const boxes = D.findRowCheckboxes();
     if (boxes.length !== total) {
