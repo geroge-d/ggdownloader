@@ -265,8 +265,29 @@
           const mine = list.filter((e) => e.pageType === pageType && e.kind === kind);
           if (!mine.length) continue;
           // 分趟下载的一组没走完（中途停了、页面关了）：每一趟只下了其中几行，记录上的日期却是整段，
-          // 不能算这段日期下过 —— 整组下完才会给每一趟补上 chunkDone。旧记录没有 chunkOf，照旧算
-          const clicked = mine.filter((e) => effectiveStatus(e) === "clicked" && !(e.chunkOf && !e.chunkDone));
+          // 不能算这段日期下过 —— 这一遍下完才会给每一趟补上 chunkDone。没标上但各趟的行连起来
+          // 正好是第 1 行到最后一行，也算下完（1.3.7 只在整批下完才标，概要那遍下完、手牌失败时漏标）。
+          // 旧记录没有 chunkOf，照旧算
+          const groupDone = new Map();
+          const groupOf = (e) => [e.runId || "", e.batch || "", e.from, e.to].join("|");
+          const rowsCovered = (g) => {
+            const marks = new Array(g[0].chunkOf + 1).fill(false);
+            for (const e of g) {
+              const m = /^(\d+)-(\d+)$/.exec(e.rowRange || "");
+              if (m) for (let r = +m[1]; r <= Math.min(+m[2], e.chunkOf); r++) marks[r] = true;
+            }
+            return marks.slice(1).every(Boolean);
+          };
+          const chunkOk = (e) => {
+            if (!e.chunkOf || e.chunkDone) return true;
+            const k = groupOf(e);
+            if (!groupDone.has(k)) {
+              const g = mine.filter((x) => x.chunkOf && groupOf(x) === k && effectiveStatus(x) === "clicked");
+              groupDone.set(k, g.some((x) => x.chunkDone) || rowsCovered(g));
+            }
+            return groupDone.get(k);
+          };
+          const clicked = mine.filter((e) => effectiveStatus(e) === "clicked" && chunkOk(e));
           const noData = mine.filter((e) => e.status === "no_data");
           const failed = mine.filter((e) => effectiveStatus(e) === "failed");
           const allClicked = mine.filter((e) => e.status === "clicked");

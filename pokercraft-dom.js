@@ -568,25 +568,38 @@
     return checked;
   }
 
-  /** 取消所有行的勾选（含表头全选）。 */
+  /**
+   * 取消所有行的勾选：只点勾着的行，不碰表头。
+   *
+   * GG 的表头是延后执行的切换：点完先转圈，下一个 tick 才看"是不是全选了"，全选就清空、否则全选。
+   * 以前先点表头、再在同一时刻把每一行点掉，等它执行时已经一行不剩，于是又把整张表全选上 ——
+   * 行上的勾还显示没勾，按钮却是全部，再怎么点也清不掉。表头只能单独点，见 clickSelectAllAlone。
+   */
   function clearSelection() {
-    const rows = findRowCheckboxes().filter((b) => b.tagName === "INPUT");
-    const header = findSelectAllCheckbox();
-    // 只在每一行都勾着时才点表头取消全选：只勾了一部分时点表头会变成"全选"，
-    // 勾上几百行超过 500 就弹"下载限制"遮罩
-    if (header && header.tagName === "INPUT" && header.checked && rows.length && rows.every((b) => b.checked)) {
-      header.click();
-    }
     findRowCheckboxes().forEach((b) => {
       if (b.tagName === "INPUT" && b.checked) b.click();
     });
-    // 下载完 GG 会把行上的勾去掉，表头和它内部的选中却还是全部：行上都没勾了，按钮上仍有条数，
-    // 表头 checked 且不是半选，才点表头取消。按钮是 0 时表头勾着只是没同步，点了反而变成全选
+  }
+
+  /**
+   * 单独点一下表头：GG 在下一个 tick 看是不是全选了，全选就清空，否则全选。
+   * 表头显示的勾不一定对（和行一样可能没同步），所以不看它：调用方点完等按钮数字稳定，
+   * 还有选中就再点一次（部分选中 → 全选 → 清空）。点完到数字稳定之前不能再点任何复选框。返回点了没有。
+   */
+  function clickSelectAllAlone() {
     const h = findSelectAllCheckbox();
-    const left = downloadCount(findSummaryButton()) || downloadCount(findHistoryButton());
-    if (h && h.tagName === "INPUT" && h.checked && !h.indeterminate && left > 0) {
-      h.click();
-    }
+    if (!h || h.tagName !== "INPUT") return false;
+    h.click();
+    return true;
+  }
+
+  /**
+   * 切换一行的选中：点整行（GG 的行点击就是 selection.toggle）。
+   * 不点行里的复选框：它按自己显示的勾去翻，显示和 GG 的选中对不上时会翻反。
+   */
+  function toggleRow(box) {
+    const tr = box && box.closest && box.closest("tr");
+    (tr || box).click();
   }
 
   /** 表头全选框的状态（排查"下载限制"弹窗时写进日志） */
@@ -970,6 +983,8 @@
     rowDates,
     runningRowDates,
     clearSelection,
+    clickSelectAllAlone,
+    toggleRow,
     // 下载
     findSummaryButton,
     findHistoryButton,

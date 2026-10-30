@@ -94,6 +94,9 @@ def check_api():
     r = subprocess.run([node, script], cwd=SRC)
     if r.returncode != 0:
         raise SystemExit("接口检查未通过，已中止打包")
+    r = subprocess.run([node, os.path.join(SRC, "tools", "test_ledger.js")], cwd=SRC)
+    if r.returncode != 0:
+        raise SystemExit("下载记录检查未通过，已中止打包")
 
 
 def main():

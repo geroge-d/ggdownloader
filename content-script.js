@@ -2034,14 +2034,19 @@ function saveSummaryHandsBound() {
 // 日期筛选不变，再点一次"显示"重新加载列表，等它稳定下来。加载不稳就当没成功
 async function reloadTable() {
   const btn = D.findShowButton();
-  if (!btn) {
-    logWarning("重新加载列表：没找到\"显示\"按钮", "chunk");
+  if (!btn || btn.disabled) {
+    logWarning(`重新加载列表：${btn ? '"显示"按钮不能点' : '没找到"显示"按钮'}`, "chunk");
     return false;
   }
   const fpBefore = D.tableFingerprint();
   const netBefore = D.netState();
   await simulateHumanClick(btn);
   const settle = await waitForTableSettled(fpBefore, netBefore);
+  // 行变了（比如有比赛刚打完）就不能接着按第几行分趟：会漏一行、重一行
+  if (settle.changed) {
+    logWarning(`重新加载列表后行变了（${settle.rows} 行），不能接着按行分趟`, "chunk");
+    return false;
+  }
   log(`重新加载列表：${settle.stable ? '' : '没有'}加载完成，${settle.rows} 行`, "chunk");
   return settle.stable;
 }
@@ -2070,24 +2075,27 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
   // 勾第 from..to-1 行，等按钮上的数字稳定下来再读
   const pick = async (from, to) => {
     // 清不掉就不能往下勾：剩下的已选行会跟着这一趟一起下，每趟都把整段重下一遍
+    const selectedCount = () => D.downloadCount(D.findSummaryButton()) || D.downloadCount(D.findHistoryButton());
     const tryClear = async () => {
-      let n = 0;
-      for (let t = 0; t < 3; t++) {
-        D.clearSelection();
-        await wait(randomBetween(300, 600) + t * 500);
-        // 清勾时万一点出了"下载限制"，先关掉：留着的话下面勾完这一趟会被当成这一趟超限
+      D.clearSelection();
+      await wait(randomBetween(400, 700));
+      let n = selectedCount();
+      // 行上看不出勾、按钮上却还有选中：单独点表头，等 GG 转完圈、数字稳定再看，这期间不点别的
+      // （和行一起点会被它延后的"全选"盖回去）。全选时点一次就清空；部分选中时第一次是全选、第二次清空
+      for (let t = 0; t < 2 && n > 0 && D.clickSelectAllAlone(); t++) {
+        await D.waitFor(() => !selectedCount(), 2500, 150);
+        await wait(300);
+        // 全选时可能弹"下载限制"，先关掉：留着的话下面勾完这一趟会被当成这一趟超限
         if (D.findLimitError() || D.findLimitDialog()) {
           await dismissLimitDialog("清空勾选后", !!D.findLimitError());
         }
-        n = D.downloadCount(D.findSummaryButton()) || D.downloadCount(D.findHistoryButton());
-        if (!n) break;
-        logWarning(`清空勾选后按钮仍是 ${n} 条（表头 ${D.selectAllState()}），第 ${t + 1} 次没清掉`, "chunk");
+        n = selectedCount();
       }
+      if (n) logWarning(`清空勾选后按钮仍是 ${n} 条（表头 ${D.selectAllState()}）`, "chunk");
       return n;
     };
     let left = await tryClear();
-    // 整张表都勾上下载过一次后，GG 去掉了行上的勾，选中却还在，点表头和行都清不掉；
-    // 重新加载一次列表（日期没变，再点"显示"）选中就没了 —— 换下一段日期时就是这样清掉的
+    // 还清不掉就重新加载一次列表（日期没变，再点"显示"）：GG 重新查询时会清空选中
     if (left > 0 && !stopFlag) {
       log(`勾选清不掉，重新加载列表（${startStr} ~ ${endStr}）再试`, "chunk");
       if (await reloadTable()) left = await tryClear();
@@ -2101,9 +2109,9 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
       logWarning(`行数从 ${total} 变成 ${boxes.length}，表格被重渲染了，放弃分批`, "chunk");
       return { ok: false };
     }
+    // 选中已经确认是空的，每行点一次就是选上（点整行，不看复选框显示的勾）
     for (let r = from; r < to; r++) {
-      const b = boxes[r];
-      if (b && b.tagName === "INPUT" && !b.checked) b.click();
+      if (boxes[r]) D.toggleRow(boxes[r]);
     }
     let last = '', stable = 0, s = 0, h = 0;
     for (let i = 0; i < 12 && stable < 2; i++) {
@@ -2119,6 +2127,12 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
     if (limit || D.findLimitDialog()) {
       logWarning(`勾第 ${from + 1}-${to} 行后出现"下载限制"：概要 ${s} / 手牌 ${h}，表头 ${D.selectAllState()}`, "limit");
       await dismissLimitDialog("分趟勾选后", true);
+    }
+    // 概要按钮上是选中的场次数（不含还没打完的）：比这一趟勾的行还多，说明选中里混了别的行，
+    // 下了就是重复下载，不能点
+    if (D.findSummaryButton() && s > to - from) {
+      logWarning(`勾第 ${from + 1}-${to} 行（${to - from} 行）后概要按钮是 ${s} 条，选中和勾的行对不上（表头 ${D.selectAllState()}），放弃分批`, "chunk");
+      return { ok: false };
     }
     return { ok: true, sCount: s, hCount: h, limit: limit || null };
   };
@@ -2218,20 +2232,31 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
       : doHistory ? `（每趟不超过 ${handLimit} 手）` : `（每趟不超过 ${maxRows} 条）`), "chunk");
   // 概要和手牌分开分趟：各自装满各自的上限（概要 500 条一趟，手牌 2 万手一趟），
   // 比每趟两个都点省：同一段 1900 行、15 万手，一起点要 16 次，分开只要 4 + 8 次
-  if (doSummary && doHistory && summaryHandsBound) {
-    if (!(await pass(true, true, '概要+手牌'))) { chunkFailedKinds = ['summary', 'history']; return false; }
-  } else {
-    if (doSummary && !(await pass(true, false, '概要'))) { chunkFailedKinds = doHistory ? ['summary', 'history'] : ['summary']; return false; }
-    if (doHistory && !(await pass(false, true, '手牌'))) { chunkFailedKinds = ['history']; return false; }
-  }
-  D.clearSelection();
-  // 整组下完了，这几趟的记录才算下过这段日期（没走完的一组按下载记录推进同步日期时不算）
-  if (GG_LEDGER && rec) {
-    const same = (e) => e.chunkOf && e.runId === rec.runId && e.batch === rec.batch && e.pageType === rec.pageType &&
-      e.from === rec.from && e.to === rec.to;
+  // 一遍下完，这一遍那类数据的记录才算下过这段日期（没走完的一遍按下载记录推进同步日期时不算）。
+  // 按"遍"标，不等整批：概要那遍下完、手牌那遍失败时，概要照样算下过
+  const markDone = async (kinds) => {
+    if (!GG_LEDGER || !rec) return;
+    const same = (e) => e.chunkOf && kinds.includes(e.kind) && e.runId === rec.runId && e.batch === rec.batch &&
+      e.pageType === rec.pageType && e.from === rec.from && e.to === rec.to;
     await GG_LEDGER.update((list) => list.map((e) => same(e) ? Object.assign({}, e, { chunkDone: true }) : e))
       .catch((e) => console.error('[GGPoker助手] 写下载记录失败', e));
+  };
+  // 概要和手牌分开分趟：各自装满各自的上限（概要 500 条一趟，手牌 2 万手一趟），
+  // 比每趟两个都点省：同一段 1900 行、15 万手，一起点要 16 次，分开只要 4 + 8 次
+  if (doSummary && doHistory && summaryHandsBound) {
+    if (!(await pass(true, true, '概要+手牌'))) { chunkFailedKinds = ['summary', 'history']; return false; }
+    await markDone(['summary', 'history']);
+  } else {
+    if (doSummary) {
+      if (!(await pass(true, false, '概要'))) { chunkFailedKinds = doHistory ? ['summary', 'history'] : ['summary']; return false; }
+      await markDone(['summary']);
+    }
+    if (doHistory) {
+      if (!(await pass(false, true, '手牌'))) { chunkFailedKinds = ['history']; return false; }
+      await markDone(['history']);
+    }
   }
+  D.clearSelection();
   logSuccess(`${startStr} ~ ${endStr} 分 ${round} 趟下载完成`, "chunk");
   return true;
 }
