@@ -572,16 +572,21 @@
   function clearSelection() {
     const rows = findRowCheckboxes().filter((b) => b.tagName === "INPUT");
     const header = findSelectAllCheckbox();
-    // 只在全选时才点表头取消：只勾了一部分时点表头会变成"全选"，勾上几百行超过 500 就弹"下载限制"遮罩。
-    // "全选"有两种样子：每一行都勾着；或者表头 checked 且不是半选 —— 下载完 GG 会把行上的勾去掉，
-    // 表头和它内部的选中却还是全部，这时只点行清不掉，下一趟又会把全部行再下一遍
-    const allByHeader = header && header.tagName === "INPUT" && header.checked && !header.indeterminate;
-    if (allByHeader || (header && header.tagName === "INPUT" && header.checked && rows.length && rows.every((b) => b.checked))) {
+    // 只在每一行都勾着时才点表头取消全选：只勾了一部分时点表头会变成"全选"，
+    // 勾上几百行超过 500 就弹"下载限制"遮罩
+    if (header && header.tagName === "INPUT" && header.checked && rows.length && rows.every((b) => b.checked)) {
       header.click();
     }
     findRowCheckboxes().forEach((b) => {
       if (b.tagName === "INPUT" && b.checked) b.click();
     });
+    // 下载完 GG 会把行上的勾去掉，表头和它内部的选中却还是全部：行上都没勾了，按钮上仍有条数，
+    // 表头 checked 且不是半选，才点表头取消。按钮是 0 时表头勾着只是没同步，点了反而变成全选
+    const h = findSelectAllCheckbox();
+    const left = downloadCount(findSummaryButton()) || downloadCount(findHistoryButton());
+    if (h && h.tagName === "INPUT" && h.checked && !h.indeterminate && left > 0) {
+      h.click();
+    }
   }
 
   /** 表头全选框的状态（排查"下载限制"弹窗时写进日志） */

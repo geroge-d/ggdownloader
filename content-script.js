@@ -1725,7 +1725,8 @@ async function promptDownload(kind, expectedCount, startStr, endStr, rec, opts =
     if (opts.reselect) {
       // 分趟时不能全选（会勾上整张表、超过上限），只重新勾回这一趟的那些行
       logWarning(`${label}按钮不可用（上一次下载后 GG 清空了勾选），第 ${recoverTries} 次重新勾回这一趟的行`, 'promptDownload');
-      await opts.reselect();
+      const r = await opts.reselect();
+      if (!r || !r.ok) return false;   // 清不掉勾选 / 表格变了：重试也没用
       await wait(randomBetween(500, 900));
       continue;
     }
@@ -2058,6 +2059,10 @@ async function downloadInChunks(chunkSize, startStr, endStr, inHistoryWindow, re
     for (let t = 0; t < 3; t++) {
       D.clearSelection();
       await wait(randomBetween(300, 600) + t * 500);
+      // 清勾时万一点出了"下载限制"，先关掉：留着的话下面勾完这一趟会被当成这一趟超限
+      if (D.findLimitError() || D.findLimitDialog()) {
+        await dismissLimitDialog("清空勾选后", !!D.findLimitError());
+      }
       left = D.downloadCount(D.findSummaryButton()) || D.downloadCount(D.findHistoryButton());
       if (!left) break;
       logWarning(`清空勾选后按钮仍是 ${left} 条（表头 ${D.selectAllState()}），第 ${t + 1} 次没清掉`, "chunk");
